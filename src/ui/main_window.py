@@ -15,6 +15,7 @@ from PyQt6.QtGui import QFont
 
 from ..modules import SystemMonitor, ProcessManager, NetworkManager, AIAssistant
 from ..modules.windows_commands import WindowsCommands
+from ..utils import Config
 
 
 class MainWindow(QMainWindow):
@@ -33,7 +34,7 @@ class MainWindow(QMainWindow):
         # Setup auto-refresh timer
         self.timer = QTimer()
         self.timer.timeout.connect(self.refresh_data)
-        self.timer.start(2000)  # Refresh every 2 seconds
+        self.timer.start(Config.REFRESH_INTERVAL)  # Use config value
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -285,7 +286,15 @@ class MainWindow(QMainWindow):
             return
         
         pid_item = self.process_table.item(selected_rows[0].row(), 0)
-        pid = int(pid_item.text())
+        if not pid_item:
+            QMessageBox.warning(self, "Error", "Could not get process information")
+            return
+        
+        try:
+            pid = int(pid_item.text())
+        except (ValueError, AttributeError):
+            QMessageBox.warning(self, "Error", "Invalid process ID")
+            return
         
         reply = QMessageBox.question(
             self, "Confirm", f"Kill process with PID {pid}?",

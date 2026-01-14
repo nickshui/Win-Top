@@ -25,17 +25,22 @@ class WindowsCommands:
             Tuple of (success, output)
         """
         try:
+            # Validate command to prevent injection
+            if not command or not all(isinstance(arg, str) for arg in command):
+                return False, "Invalid command format"
+            
             result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                shell=True if self.is_windows else False,
+                shell=False,  # Use shell=False for better security
                 timeout=30
             )
             return True, result.stdout if result.returncode == 0 else result.stderr
         except subprocess.TimeoutExpired:
             return False, "Command timed out"
         except Exception as e:
+            return False, f"Error: {str(e)}"
             return False, f"Error: {str(e)}"
     
     def ipconfig(self, option: str = "") -> Tuple[bool, str]:

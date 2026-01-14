@@ -18,8 +18,9 @@ class SystemMonitor:
     def get_cpu_info(self) -> Dict:
         """Get CPU usage information"""
         cpu_percent = psutil.cpu_percent(interval=1, percpu=True)
+        total_usage = sum(cpu_percent) / len(cpu_percent) if cpu_percent else 0
         return {
-            'total_usage': psutil.cpu_percent(interval=0.1),
+            'total_usage': total_usage,
             'per_cpu': cpu_percent,
             'count': psutil.cpu_count(logical=True),
             'physical_count': psutil.cpu_count(logical=False),
