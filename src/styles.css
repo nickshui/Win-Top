@@ -1,0 +1,286 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #0f1115;
+  color: #e5e7eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #0f1115;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 28px;
+  border-bottom: 1px solid #1f2430;
+  background: #11141b;
+}
+
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.brand-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #7c3aed;
+  box-shadow: 0 0 12px rgba(124, 58, 237, 0.8);
+}
+
+.brand-title {
+  font-weight: 600;
+  font-size: 18px;
+}
+
+.brand-subtitle {
+  font-size: 12px;
+  color: #8f97a6;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.search {
+  width: 260px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #242b3a;
+  background: #141822;
+  color: #e5e7eb;
+}
+
+.primary {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: none;
+  background: linear-gradient(135deg, #6366f1, #7c3aed);
+  color: white;
+  cursor: pointer;
+}
+
+.ghost {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #2a3242;
+  background: transparent;
+  color: #cbd5f5;
+  cursor: pointer;
+}
+
+.content {
+  display: grid;
+  grid-template-columns: 200px 1fr 260px;
+  gap: 20px;
+  padding: 20px 24px;
+}
+
+.sidebar {
+  background: #11141b;
+  border-radius: 16px;
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: calc(100vh - 120px);
+}
+
+.nav-item {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: #b5bdd1;
+  text-decoration: none;
+}
+
+.nav-item.active {
+  background: #1d2230;
+  color: #ffffff;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: #9aa3b2;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #22c55e;
+}
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.card {
+  background: #121721;
+  border-radius: 16px;
+  padding: 18px;
+  border: 1px solid #1f2430;
+}
+
+.card-title {
+  color: #9aa3b2;
+  font-size: 12px;
+}
+
+.card-value {
+  font-size: 28px;
+  font-weight: 600;
+  margin: 10px 0;
+}
+
+.card-sub {
+  font-size: 12px;
+  color: #7f8898;
+}
+
+.panel-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: #121721;
+  border-radius: 16px;
+  border: 1px solid #1f2430;
+  padding: 18px;
+}
+
+.panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.panel h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.list-name {
+  font-weight: 500;
+}
+
+.list-metric {
+  color: #8f97a6;
+  font-size: 12px;
+}
+
+.port-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-bottom: 1px solid #1f2430;
+}
+
+.port-item:last-child {
+  border-bottom: none;
+}
+
+.port {
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.port-sub {
+  font-size: 12px;
+  color: #8f97a6;
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.tool {
+  background: #151b28;
+  border: 1px solid #222939;
+  color: #d7dff3;
+  border-radius: 10px;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.assistant-card {
+  background: #121721;
+  border-radius: 16px;
+  border: 1px solid #1f2430;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.assistant-card h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.assistant-card p {
+  margin: 0;
+  color: #9aa3b2;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dev-banner {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: rgba(99, 102, 241, 0.15);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+  color: #c7d2fe;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  backdrop-filter: blur(6px);
+}
