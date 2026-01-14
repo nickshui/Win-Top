@@ -19,7 +19,11 @@ class ProcessManager:
         for proc in psutil.process_iter(['pid', 'name', 'username', 'status', 'cpu_percent', 'memory_percent', 'memory_info', 'create_time']):
             try:
                 pinfo = proc.info
-                pinfo['memory_mb'] = round(pinfo.get('memory_info', psutil._psplatform.pmem(0, 0)).rss / (1024**2), 2)
+                mem_info = pinfo.get('memory_info')
+                if mem_info:
+                    pinfo['memory_mb'] = round(mem_info.rss / (1024**2), 2)
+                else:
+                    pinfo['memory_mb'] = 0
                 processes.append(pinfo)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
