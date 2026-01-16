@@ -282,6 +282,12 @@ body {
   gap: 12px;
 }
 
+.monitor-meta {
+  font-size: 12px;
+  color: #8f97a6;
+  margin-bottom: 12px;
+}
+
 .monitor-row {
   display: grid;
   grid-template-columns: 120px 1fr 60px;

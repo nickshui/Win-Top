@@ -26,31 +26,61 @@ if (data) {
   document.getElementById("ai-issue-3-tag").textContent = issue3.tag;
 
   const monitorList = document.getElementById("monitor-list");
-  data.monitorOverview.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "monitor-row";
+  const monitorUpdated = document.getElementById("monitor-updated");
 
-    const label = document.createElement("div");
-    label.className = "monitor-label";
-    label.textContent = item.label;
+  const renderMonitorRows = () => {
+    monitorList.innerHTML = "";
 
-    const bar = document.createElement("div");
-    bar.className = "monitor-bar";
+    data.monitorOverview.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "monitor-row";
 
-    const fill = document.createElement("div");
-    fill.className = "monitor-bar-fill";
-    fill.style.width = `${Math.round(item.value * 100)}%`;
+      const label = document.createElement("div");
+      label.className = "monitor-label";
+      label.textContent = item.label;
 
-    const value = document.createElement("div");
-    value.className = "monitor-value";
-    value.textContent = item.display;
+      const bar = document.createElement("div");
+      bar.className = "monitor-bar";
 
-    bar.appendChild(fill);
-    row.appendChild(label);
-    row.appendChild(bar);
-    row.appendChild(value);
-    monitorList.appendChild(row);
-  });
+      const fill = document.createElement("div");
+      fill.className = "monitor-bar-fill";
+      fill.style.width = `${Math.round(item.value * 100)}%`;
+
+      const value = document.createElement("div");
+      value.className = "monitor-value";
+      value.textContent = item.display;
+
+      bar.appendChild(fill);
+      row.appendChild(label);
+      row.appendChild(bar);
+      row.appendChild(value);
+      monitorList.appendChild(row);
+    });
+
+    const now = new Date();
+    monitorUpdated.textContent = `${now.getHours().toString().padStart(2, "0")}:${now
+      .getMinutes()
+      .toString()
+      .padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+  };
+
+  const randomizeMonitor = () => {
+    data.monitorOverview = data.monitorOverview.map((item) => {
+      const delta = (Math.random() - 0.5) * 0.06;
+      const nextValue = Math.min(0.95, Math.max(0.05, item.value + delta));
+      return {
+        ...item,
+        value: Number(nextValue.toFixed(2)),
+        display: `${Math.round(nextValue * 100)}%`
+      };
+    });
+  };
+
+  renderMonitorRows();
+  setInterval(() => {
+    randomizeMonitor();
+    renderMonitorRows();
+  }, 3000);
 }
 
 const banner = document.createElement("div");
