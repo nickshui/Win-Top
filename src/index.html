@@ -43,18 +43,18 @@
           <section class="cards">
             <article class="card">
               <div class="card-title">CPU 使用率</div>
-              <div class="card-value">28%</div>
-              <div class="card-sub">峰值 42% · 过去 15 分钟</div>
+              <div class="card-value" id="cpu-value">--</div>
+              <div class="card-sub" id="cpu-sub">--</div>
             </article>
             <article class="card">
               <div class="card-title">内存占用</div>
-              <div class="card-value">62%</div>
-              <div class="card-sub">12.4 GB / 20 GB</div>
+              <div class="card-value" id="memory-value">--</div>
+              <div class="card-sub" id="memory-sub">--</div>
             </article>
             <article class="card">
               <div class="card-title">网络流量</div>
-              <div class="card-value">8.4 MB/s</div>
-              <div class="card-sub">上行 1.2 · 下行 7.2</div>
+              <div class="card-value" id="network-value">--</div>
+              <div class="card-sub" id="network-sub">--</div>
             </article>
           </section>
 
@@ -67,21 +67,21 @@
               <div class="ai-checkup-body">
                 <div class="ai-checkup-score">
                   <div class="score-label">综合评分</div>
-                  <div class="score-value">86</div>
-                  <div class="score-sub">系统运行稳定 · 风险较低</div>
+                  <div class="score-value" id="ai-score">--</div>
+                  <div class="score-sub" id="ai-score-sub">--</div>
                 </div>
                 <div class="ai-checkup-list">
                   <div class="ai-checkup-item">
-                    <span>内存占用偏高</span>
-                    <span class="tag warning">建议优化</span>
+                    <span id="ai-issue-1">--</span>
+                    <span class="tag warning" id="ai-issue-1-tag">--</span>
                   </div>
                   <div class="ai-checkup-item">
-                    <span>磁盘健康良好</span>
-                    <span class="tag success">正常</span>
+                    <span id="ai-issue-2">--</span>
+                    <span class="tag success" id="ai-issue-2-tag">--</span>
                   </div>
                   <div class="ai-checkup-item">
-                    <span>可疑端口连接</span>
-                    <span class="tag warning">需关注</span>
+                    <span id="ai-issue-3">--</span>
+                    <span class="tag warning" id="ai-issue-3-tag">--</span>
                   </div>
                 </div>
               </div>
@@ -157,6 +157,7 @@
         </aside>
       </div>
     </div>
+    <script src="./data.js"></script>
     <script src="./main.js"></script>
   </body>
 </html>
