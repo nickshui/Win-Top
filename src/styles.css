@@ -277,6 +277,45 @@ body {
   font-size: 12px;
 }
 
+.monitor-list {
+  display: grid;
+  gap: 12px;
+}
+
+.monitor-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 60px;
+  gap: 12px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.monitor-label {
+  color: #c5cada;
+}
+
+.monitor-bar {
+  position: relative;
+  height: 8px;
+  background: #1f2533;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.monitor-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #22c55e);
+}
+
+.monitor-value {
+  text-align: right;
+  color: #9aa3b2;
+}
+
 .port-item {
   display: flex;
   align-items: center;

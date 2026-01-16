@@ -24,6 +24,33 @@ if (data) {
 
   document.getElementById("ai-issue-3").textContent = issue3.label;
   document.getElementById("ai-issue-3-tag").textContent = issue3.tag;
+
+  const monitorList = document.getElementById("monitor-list");
+  data.monitorOverview.forEach((item) => {
+    const row = document.createElement("div");
+    row.className = "monitor-row";
+
+    const label = document.createElement("div");
+    label.className = "monitor-label";
+    label.textContent = item.label;
+
+    const bar = document.createElement("div");
+    bar.className = "monitor-bar";
+
+    const fill = document.createElement("div");
+    fill.className = "monitor-bar-fill";
+    fill.style.width = `${Math.round(item.value * 100)}%`;
+
+    const value = document.createElement("div");
+    value.className = "monitor-value";
+    value.textContent = item.display;
+
+    bar.appendChild(fill);
+    row.appendChild(label);
+    row.appendChild(bar);
+    row.appendChild(value);
+    monitorList.appendChild(row);
+  });
 }
 
 const banner = document.createElement("div");
