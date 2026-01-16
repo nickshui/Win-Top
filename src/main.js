@@ -27,11 +27,12 @@ if (data) {
 
   const monitorList = document.getElementById("monitor-list");
   const monitorUpdated = document.getElementById("monitor-updated");
+  const tauriInvoke = window?.__TAURI__?.invoke;
 
-  const renderMonitorRows = () => {
+  const renderMonitorRows = (overview, updatedAt) => {
     monitorList.innerHTML = "";
 
-    data.monitorOverview.forEach((item) => {
+    overview.forEach((item) => {
       const row = document.createElement("div");
       row.className = "monitor-row";
 
@@ -57,8 +58,12 @@ if (data) {
       monitorList.appendChild(row);
     });
 
+    monitorUpdated.textContent = updatedAt;
+  };
+
+  const formatNow = () => {
     const now = new Date();
-    monitorUpdated.textContent = `${now.getHours().toString().padStart(2, "0")}:${now
+    return `${now.getHours().toString().padStart(2, "0")}:${now
       .getMinutes()
       .toString()
       .padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
@@ -76,11 +81,19 @@ if (data) {
     });
   };
 
-  renderMonitorRows();
-  setInterval(() => {
-    randomizeMonitor();
-    renderMonitorRows();
-  }, 3000);
+  const fetchMonitorSnapshot = async () => {
+    if (!tauriInvoke) {
+      randomizeMonitor();
+      renderMonitorRows(data.monitorOverview, formatNow());
+      return;
+    }
+
+    const snapshot = await tauriInvoke("get_monitor_snapshot");
+    renderMonitorRows(snapshot.overview, snapshot.updated_at);
+  };
+
+  fetchMonitorSnapshot();
+  setInterval(fetchMonitorSnapshot, 3000);
 }
 
 const banner = document.createElement("div");
