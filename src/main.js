@@ -37,6 +37,8 @@ if (data) {
   const detailStatus = document.getElementById("process-status");
   const terminateButton = document.getElementById("terminate-process");
   const priorityButton = document.getElementById("set-priority");
+  const portList = document.getElementById("port-list");
+  const portCount = document.getElementById("port-count");
   const modal = document.getElementById("confirm-modal");
   const modalTitle = document.getElementById("modal-title");
   const modalBody = document.getElementById("modal-body");
@@ -98,6 +100,36 @@ if (data) {
       row.appendChild(metric);
       row.appendChild(button);
       processList.appendChild(row);
+    });
+  };
+
+  const renderPortRows = (items) => {
+    portList.innerHTML = "";
+    portCount.textContent = items.length.toString();
+
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "port-item";
+
+      const info = document.createElement("div");
+      const port = document.createElement("div");
+      port.className = "port";
+      port.textContent = `:${item.port}`;
+
+      const meta = document.createElement("div");
+      meta.className = "port-sub";
+      meta.textContent = `${item.process} · PID ${item.pid} · ${item.protocol}`;
+
+      info.appendChild(port);
+      info.appendChild(meta);
+
+      const button = document.createElement("button");
+      button.className = "ghost";
+      button.textContent = "查看进程";
+
+      row.appendChild(info);
+      row.appendChild(button);
+      portList.appendChild(row);
     });
   };
 
@@ -188,6 +220,16 @@ if (data) {
     renderProcessDetail(detail);
   };
 
+  const fetchPortOverview = async () => {
+    if (!tauriInvoke) {
+      renderPortRows(data.portOverview);
+      return;
+    }
+
+    const ports = await tauriInvoke("get_port_overview");
+    renderPortRows(ports);
+  };
+
   const terminateProcess = async () => {
     const pid = Number(detailPid.textContent);
     if (!tauriInvoke) {
@@ -214,6 +256,7 @@ if (data) {
 
   fetchProcessOverview();
   fetchProcessDetail(data.processDetail.pid);
+  fetchPortOverview();
 
   terminateButton.addEventListener("click", () => {
     openModal({

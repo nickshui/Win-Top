@@ -322,6 +322,17 @@ body {
   border: 1px dashed #2a3242;
 }
 
+.port-meta {
+  font-size: 12px;
+  color: #8f97a6;
+  margin-bottom: 12px;
+}
+
+.port-list {
+  display: grid;
+  gap: 12px;
+}
+
 .modal {
   position: fixed;
   inset: 0;

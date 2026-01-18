@@ -141,20 +141,8 @@
                 <h3>端口与连接</h3>
                 <button class="ghost">查看详情</button>
               </header>
-              <div class="port-item">
-                <div>
-                  <div class="port">:3000</div>
-                  <div class="port-sub">Node · PID 2316</div>
-                </div>
-                <button class="primary">释放端口</button>
-              </div>
-              <div class="port-item">
-                <div>
-                  <div class="port">:5432</div>
-                  <div class="port-sub">PostgreSQL · PID 412</div>
-                </div>
-                <button class="ghost">查看进程</button>
-              </div>
+              <div class="port-meta">活跃端口：<span id="port-count">--</span></div>
+              <div class="port-list" id="port-list"></div>
             </article>
 
             <article class="panel">

@@ -45,5 +45,10 @@ window.dashboardData = {
       current: "普通",
       options: ["低", "普通", "高", "实时"]
     }
-  }
+  },
+  portOverview: [
+    { port: 3000, protocol: "TCP", process: "Node", pid: 2316 },
+    { port: 5432, protocol: "TCP", process: "PostgreSQL", pid: 412 },
+    { port: 6379, protocol: "TCP", process: "Redis", pid: 902 }
+  ]
 };

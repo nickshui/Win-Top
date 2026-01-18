@@ -40,6 +40,14 @@ struct ActionResult {
     message: String,
 }
 
+#[derive(Serialize)]
+struct PortOverviewItem {
+    port: u16,
+    protocol: String,
+    process: String,
+    pid: u32,
+}
+
 #[tauri::command]
 fn get_monitor_snapshot() -> MonitorSnapshot {
     let mut system = System::new_all();
@@ -171,6 +179,30 @@ fn set_process_priority(_pid: u32, _level: String) -> ActionResult {
     }
 }
 
+#[tauri::command]
+fn get_port_overview() -> Vec<PortOverviewItem> {
+    vec![
+        PortOverviewItem {
+            port: 3000,
+            protocol: "TCP".to_string(),
+            process: "Node".to_string(),
+            pid: 2316,
+        },
+        PortOverviewItem {
+            port: 5432,
+            protocol: "TCP".to_string(),
+            process: "PostgreSQL".to_string(),
+            pid: 412,
+        },
+        PortOverviewItem {
+            port: 6379,
+            protocol: "TCP".to_string(),
+            process: "Redis".to_string(),
+            pid: 902,
+        },
+    ]
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -178,7 +210,8 @@ fn main() {
             get_process_overview,
             get_process_detail,
             terminate_process,
-            set_process_priority
+            set_process_priority,
+            get_port_overview
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
