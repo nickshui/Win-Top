@@ -27,5 +27,10 @@ window.dashboardData = {
     { label: "内存压力", value: 0.62, display: "62%" },
     { label: "磁盘活跃度", value: 0.44, display: "44%" },
     { label: "网络占用", value: 0.35, display: "35%" }
+  ],
+  processOverview: [
+    { name: "Chrome", cpu: 14, memory: "1.6 GB" },
+    { name: "Visual Studio Code", cpu: 9, memory: "980 MB" },
+    { name: "Docker Desktop", cpu: 5, memory: "1.2 GB" }
   ]
 };

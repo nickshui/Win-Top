@@ -91,20 +91,8 @@
                 <h3>进程资源占用</h3>
                 <button class="ghost">查看全部</button>
               </header>
-              <ul class="list">
-                <li>
-                  <span class="list-name">Chrome</span>
-                  <span class="list-metric">CPU 14% · 内存 1.6 GB</span>
-                </li>
-                <li>
-                  <span class="list-name">Visual Studio Code</span>
-                  <span class="list-metric">CPU 9% · 内存 980 MB</span>
-                </li>
-                <li>
-                  <span class="list-name">Docker Desktop</span>
-                  <span class="list-metric">CPU 5% · 内存 1.2 GB</span>
-                </li>
-              </ul>
+              <div class="process-meta">总进程数：<span id="process-count">--</span></div>
+              <ul class="list" id="process-list"></ul>
             </article>
             <article class="panel">
               <header>

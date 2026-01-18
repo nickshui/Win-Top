@@ -2,7 +2,7 @@
 
 use chrono::Local;
 use serde::Serialize;
-use sysinfo::{DiskExt, NetworkExt, System, SystemExt};
+use sysinfo::{DiskExt, NetworkExt, ProcessExt, System, SystemExt};
 
 #[derive(Serialize)]
 struct MonitorOverviewItem {
@@ -15,6 +15,13 @@ struct MonitorOverviewItem {
 struct MonitorSnapshot {
     updated_at: String,
     overview: Vec<MonitorOverviewItem>,
+}
+
+#[derive(Serialize)]
+struct ProcessOverviewItem {
+    name: String,
+    cpu: f32,
+    memory: String,
 }
 
 #[tauri::command]
@@ -77,9 +84,32 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
     }
 }
 
+#[tauri::command]
+fn get_process_overview() -> Vec<ProcessOverviewItem> {
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    let mut processes: Vec<ProcessOverviewItem> = system
+        .processes()
+        .values()
+        .map(|process| ProcessOverviewItem {
+            name: process.name().to_string(),
+            cpu: process.cpu_usage(),
+            memory: format!("{:.1} MB", process.memory() as f32 / 1024.0),
+        })
+        .collect();
+
+    processes.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
+    processes.truncate(5);
+    processes
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_monitor_snapshot])
+        .invoke_handler(tauri::generate_handler![
+            get_monitor_snapshot,
+            get_process_overview
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
 }

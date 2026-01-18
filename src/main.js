@@ -27,7 +27,30 @@ if (data) {
 
   const monitorList = document.getElementById("monitor-list");
   const monitorUpdated = document.getElementById("monitor-updated");
+  const processList = document.getElementById("process-list");
+  const processCount = document.getElementById("process-count");
   const tauriInvoke = window?.__TAURI__?.invoke;
+
+  const renderProcessRows = (items) => {
+    processList.innerHTML = "";
+    processCount.textContent = items.length.toString();
+
+    items.forEach((item) => {
+      const row = document.createElement("li");
+
+      const name = document.createElement("span");
+      name.className = "list-name";
+      name.textContent = item.name;
+
+      const metric = document.createElement("span");
+      metric.className = "list-metric";
+      metric.textContent = `CPU ${item.cpu}% · 内存 ${item.memory}`;
+
+      row.appendChild(name);
+      row.appendChild(metric);
+      processList.appendChild(row);
+    });
+  };
 
   const renderMonitorRows = (overview, updatedAt) => {
     monitorList.innerHTML = "";
@@ -94,6 +117,18 @@ if (data) {
 
   fetchMonitorSnapshot();
   setInterval(fetchMonitorSnapshot, 3000);
+
+  const fetchProcessOverview = async () => {
+    if (!tauriInvoke) {
+      renderProcessRows(data.processOverview);
+      return;
+    }
+
+    const processes = await tauriInvoke("get_process_overview");
+    renderProcessRows(processes);
+  };
+
+  fetchProcessOverview();
 }
 
 const banner = document.createElement("div");

@@ -277,6 +277,12 @@ body {
   font-size: 12px;
 }
 
+.process-meta {
+  font-size: 12px;
+  color: #8f97a6;
+  margin-bottom: 12px;
+}
+
 .monitor-list {
   display: grid;
   gap: 12px;
