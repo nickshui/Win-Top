@@ -144,10 +144,11 @@ if (data) {
     items.forEach((item) => {
       const card = document.createElement("button");
       card.className = "tool";
+      const shellLabel = item.shell ? item.shell.toUpperCase() : "CMD";
       const badge = item.requiresAdmin
         ? `<span class="tool-badge">需要管理员权限</span>`
         : `<span class="tool-badge tool-badge--ok">普通权限</span>`;
-      card.innerHTML = `<strong>${item.name}</strong><br /><span>${item.description}</span><span class="tool-command">${item.command}</span>${badge}`;
+      card.innerHTML = `<strong>${item.name}</strong><br /><span>${item.description}</span><span class="tool-command">${shellLabel} · ${item.command}</span>${badge}`;
       card.addEventListener("click", () => {
         executeToolCommand(item);
       });

@@ -55,6 +55,7 @@ struct ToolboxItem {
     description: String,
     command: String,
     requires_admin: bool,
+    shell: String,
 }
 
 #[tauri::command]
@@ -221,6 +222,7 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
             description: "执行基础网络诊断与修复命令。".to_string(),
             command: "ipconfig /flushdns".to_string(),
             requires_admin: true,
+            shell: "cmd".to_string(),
         },
         ToolboxItem {
             id: "disk-clean".to_string(),
@@ -228,6 +230,7 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
             description: "清理临时文件并释放空间。".to_string(),
             command: "cleanmgr".to_string(),
             requires_admin: false,
+            shell: "cmd".to_string(),
         },
         ToolboxItem {
             id: "system-repair".to_string(),
@@ -235,6 +238,7 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
             description: "扫描并修复系统文件。".to_string(),
             command: "sfc /scannow".to_string(),
             requires_admin: true,
+            shell: "cmd".to_string(),
         },
         ToolboxItem {
             id: "free-port".to_string(),
@@ -242,6 +246,7 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
             description: "查找并释放占用端口的进程。".to_string(),
             command: "netstat -ano".to_string(),
             requires_admin: false,
+            shell: "powershell".to_string(),
         },
     ]
 }
@@ -266,9 +271,14 @@ fn run_toolbox_command(id: String) -> ActionResult {
         };
     }
 
-    let output = std::process::Command::new("cmd")
-        .args(["/C", &tool.command])
-        .output();
+    let output = match tool.shell.as_str() {
+        "powershell" => std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &tool.command])
+            .output(),
+        _ => std::process::Command::new("cmd")
+            .args(["/C", &tool.command])
+            .output(),
+    };
 
     match output {
         Ok(result) => {
@@ -276,13 +286,23 @@ fn run_toolbox_command(id: String) -> ActionResult {
                 let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
                 ActionResult {
                     success: true,
-                    message: format!("执行成功：{}{}", tool.command, format_output(&stdout)),
+                    message: format!(
+                        "执行成功（{}）：{}{}",
+                        tool.shell,
+                        tool.command,
+                        format_output(&stdout)
+                    ),
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
                 ActionResult {
                     success: false,
-                    message: format!("执行失败：{}{}", tool.command, format_output(&stderr)),
+                    message: format!(
+                        "执行失败（{}）：{}{}",
+                        tool.shell,
+                        tool.command,
+                        format_output(&stderr)
+                    ),
                 }
             }
         }

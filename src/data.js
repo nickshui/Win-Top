@@ -57,28 +57,32 @@ window.dashboardData = {
       name: "网络诊断",
       description: "执行基础网络诊断与修复命令。",
       command: "ipconfig /flushdns",
-      requiresAdmin: true
+      requiresAdmin: true,
+      shell: "cmd"
     },
     {
       id: "disk-clean",
       name: "磁盘清理",
       description: "清理临时文件并释放空间。",
       command: "cleanmgr",
-      requiresAdmin: false
+      requiresAdmin: false,
+      shell: "cmd"
     },
     {
       id: "system-repair",
       name: "系统修复",
       description: "扫描并修复系统文件。",
       command: "sfc /scannow",
-      requiresAdmin: true
+      requiresAdmin: true,
+      shell: "cmd"
     },
     {
       id: "free-port",
       name: "释放端口",
       description: "查找并释放占用端口的进程。",
       command: "netstat -ano",
-      requiresAdmin: false
+      requiresAdmin: false,
+      shell: "powershell"
     }
   ]
 };
