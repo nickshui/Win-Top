@@ -34,6 +34,7 @@ if (data) {
   const detailCpu = document.getElementById("detail-cpu");
   const detailMemory = document.getElementById("detail-memory");
   const detailPath = document.getElementById("detail-path");
+  const detailStatus = document.getElementById("process-status");
   const terminateButton = document.getElementById("terminate-process");
   const priorityButton = document.getElementById("set-priority");
   const modal = document.getElementById("confirm-modal");
@@ -68,6 +69,7 @@ if (data) {
     detailCpu.textContent = detail.cpu;
     detailMemory.textContent = detail.memory;
     detailPath.textContent = detail.path;
+    detailStatus.textContent = "等待操作…";
   };
 
   const renderProcessRows = (items) => {
@@ -189,12 +191,12 @@ if (data) {
   const terminateProcess = async () => {
     const pid = Number(detailPid.textContent);
     if (!tauriInvoke) {
-      alert(`已触发结束进程（模拟），PID: ${pid}`);
+      detailStatus.textContent = `已触发结束进程（模拟），PID: ${pid}`;
       return;
     }
 
     const result = await tauriInvoke("terminate_process", { pid });
-    alert(result ? "进程已结束" : "进程结束失败");
+    detailStatus.textContent = result.message;
   };
 
   const setPriority = async () => {
@@ -202,12 +204,12 @@ if (data) {
     const current = data.processActions.priority.current;
     const next = data.processActions.priority.options.find((option) => option !== current);
     if (!tauriInvoke) {
-      alert(`已模拟设置优先级为 ${next}，PID: ${pid}`);
+      detailStatus.textContent = `已模拟设置优先级为 ${next}，PID: ${pid}`;
       return;
     }
 
     const result = await tauriInvoke("set_process_priority", { pid, level: next });
-    alert(result ? `优先级已设置为 ${next}` : "设置优先级失败");
+    detailStatus.textContent = result.message;
   };
 
   fetchProcessOverview();

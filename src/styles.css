@@ -313,6 +313,15 @@ body {
   gap: 10px;
 }
 
+.detail-status {
+  font-size: 12px;
+  color: #7f8898;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(17, 20, 27, 0.7);
+  border: 1px dashed #2a3242;
+}
+
 .modal {
   position: fixed;
   inset: 0;

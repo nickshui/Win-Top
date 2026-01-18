@@ -34,6 +34,12 @@ struct ProcessDetail {
     path: String,
 }
 
+#[derive(Serialize)]
+struct ActionResult {
+    success: bool,
+    message: String,
+}
+
 #[tauri::command]
 fn get_monitor_snapshot() -> MonitorSnapshot {
     let mut system = System::new_all();
@@ -132,20 +138,37 @@ fn get_process_detail(pid: u32) -> Option<ProcessDetail> {
 }
 
 #[tauri::command]
-fn terminate_process(pid: u32) -> bool {
+fn terminate_process(pid: u32) -> ActionResult {
     let mut system = System::new_all();
     system.refresh_all();
 
-    system
-        .processes()
-        .get(&sysinfo::Pid::from_u32(pid))
-        .map(|process| process.kill())
-        .unwrap_or(false)
+    match system.processes().get(&sysinfo::Pid::from_u32(pid)) {
+        Some(process) => {
+            if process.kill() {
+                ActionResult {
+                    success: true,
+                    message: format!("进程已结束（PID {}）。", pid),
+                }
+            } else {
+                ActionResult {
+                    success: false,
+                    message: "结束进程失败：可能需要管理员权限。".to_string(),
+                }
+            }
+        }
+        None => ActionResult {
+            success: false,
+            message: "未找到进程或已退出。".to_string(),
+        },
+    }
 }
 
 #[tauri::command]
-fn set_process_priority(_pid: u32, _level: String) -> bool {
-    false
+fn set_process_priority(_pid: u32, _level: String) -> ActionResult {
+    ActionResult {
+        success: false,
+        message: "设置优先级暂未实现，需要管理员权限策略与平台适配。".to_string(),
+    }
 }
 
 fn main() {
