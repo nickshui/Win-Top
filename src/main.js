@@ -39,6 +39,9 @@ if (data) {
   const priorityButton = document.getElementById("set-priority");
   const portList = document.getElementById("port-list");
   const portCount = document.getElementById("port-count");
+  const toolGrid = document.getElementById("tool-grid");
+  const toolCount = document.getElementById("tool-count");
+  const toolLog = document.getElementById("tool-log");
   const modal = document.getElementById("confirm-modal");
   const modalTitle = document.getElementById("modal-title");
   const modalBody = document.getElementById("modal-body");
@@ -131,6 +134,25 @@ if (data) {
       row.appendChild(button);
       portList.appendChild(row);
     });
+  };
+
+  const renderToolCards = (items) => {
+    toolGrid.innerHTML = "";
+    toolCount.textContent = items.length.toString();
+
+    items.forEach((item) => {
+      const card = document.createElement("button");
+      card.className = "tool";
+      card.innerHTML = `<strong>${item.name}</strong><br /><span>${item.description}</span>`;
+      card.addEventListener("click", () => {
+        executeToolCommand(item);
+      });
+      toolGrid.appendChild(card);
+    });
+  };
+
+  const updateToolLog = (message) => {
+    toolLog.textContent = message;
   };
 
   const renderMonitorRows = (overview, updatedAt) => {
@@ -230,6 +252,34 @@ if (data) {
     renderPortRows(ports);
   };
 
+  const fetchToolbox = async () => {
+    if (!tauriInvoke) {
+      renderToolCards(data.toolbox);
+      return;
+    }
+
+    const tools = await tauriInvoke("get_toolbox_items");
+    renderToolCards(tools);
+  };
+
+  const executeToolCommand = async (tool) => {
+    openModal({
+      title: "执行命令确认",
+      body: `${tool.name} 将执行命令：${tool.command}`,
+      onConfirm: async () => {
+        if (!tauriInvoke) {
+          updateToolLog(`【模拟执行】${tool.command}\n${tool.description}`);
+          return;
+        }
+
+        const result = await tauriInvoke("run_toolbox_command", {
+          id: tool.id
+        });
+        updateToolLog(result.message);
+      }
+    });
+  };
+
   const terminateProcess = async () => {
     const pid = Number(detailPid.textContent);
     if (!tauriInvoke) {
@@ -257,6 +307,7 @@ if (data) {
   fetchProcessOverview();
   fetchProcessDetail(data.processDetail.pid);
   fetchPortOverview();
+  fetchToolbox();
 
   terminateButton.addEventListener("click", () => {
     openModal({

@@ -150,11 +150,11 @@
                 <h3>工具箱</h3>
                 <button class="ghost">管理脚本</button>
               </header>
-              <div class="tool-grid">
-                <button class="tool">网络诊断</button>
-                <button class="tool">磁盘清理</button>
-                <button class="tool">系统修复</button>
-                <button class="tool">释放端口</button>
+              <div class="tool-meta">可用命令：<span id="tool-count">--</span></div>
+              <div class="tool-grid" id="tool-grid"></div>
+              <div class="tool-log">
+                <div class="tool-log-title">执行日志</div>
+                <pre class="tool-log-body" id="tool-log">等待执行命令…</pre>
               </div>
             </article>
           </section>

@@ -48,6 +48,14 @@ struct PortOverviewItem {
     pid: u32,
 }
 
+#[derive(Serialize)]
+struct ToolboxItem {
+    id: String,
+    name: String,
+    description: String,
+    command: String,
+}
+
 #[tauri::command]
 fn get_monitor_snapshot() -> MonitorSnapshot {
     let mut system = System::new_all();
@@ -203,6 +211,47 @@ fn get_port_overview() -> Vec<PortOverviewItem> {
     ]
 }
 
+#[tauri::command]
+fn get_toolbox_items() -> Vec<ToolboxItem> {
+    vec![
+        ToolboxItem {
+            id: "net-diagnose".to_string(),
+            name: "网络诊断".to_string(),
+            description: "执行基础网络诊断与修复命令。".to_string(),
+            command: "ipconfig /flushdns".to_string(),
+        },
+        ToolboxItem {
+            id: "disk-clean".to_string(),
+            name: "磁盘清理".to_string(),
+            description: "清理临时文件并释放空间。".to_string(),
+            command: "cleanmgr".to_string(),
+        },
+        ToolboxItem {
+            id: "system-repair".to_string(),
+            name: "系统修复".to_string(),
+            description: "扫描并修复系统文件。".to_string(),
+            command: "sfc /scannow".to_string(),
+        },
+        ToolboxItem {
+            id: "free-port".to_string(),
+            name: "释放端口".to_string(),
+            description: "查找并释放占用端口的进程。".to_string(),
+            command: "netstat -ano".to_string(),
+        },
+    ]
+}
+
+#[tauri::command]
+fn run_toolbox_command(id: String) -> ActionResult {
+    ActionResult {
+        success: false,
+        message: format!(
+            "命令已记录（{}），执行引擎待实现，需要管理员权限策略。",
+            id
+        ),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -211,7 +260,9 @@ fn main() {
             get_process_detail,
             terminate_process,
             set_process_priority,
-            get_port_overview
+            get_port_overview,
+            get_toolbox_items,
+            run_toolbox_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
