@@ -283,6 +283,59 @@ body {
   margin-bottom: 12px;
 }
 
+.process-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+
+.process-row:hover {
+  color: #ffffff;
+}
+
+.process-detail {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #1f2430;
+  display: grid;
+  gap: 12px;
+}
+
+.process-detail-title {
+  font-size: 13px;
+  color: #c5cada;
+}
+
+.process-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.detail-label {
+  font-size: 11px;
+  color: #7f8898;
+}
+
+.detail-value {
+  font-size: 13px;
+  color: #d7dff3;
+  margin-top: 4px;
+}
+
+.detail-path {
+  font-size: 11px;
+  color: #9aa3b2;
+  word-break: break-all;
+}
+
+.process-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .monitor-list {
   display: grid;
   gap: 12px;

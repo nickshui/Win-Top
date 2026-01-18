@@ -2,7 +2,7 @@
 
 use chrono::Local;
 use serde::Serialize;
-use sysinfo::{DiskExt, NetworkExt, ProcessExt, System, SystemExt};
+use sysinfo::{DiskExt, NetworkExt, Pid, ProcessExt, System, SystemExt};
 
 #[derive(Serialize)]
 struct MonitorOverviewItem {
@@ -19,9 +19,20 @@ struct MonitorSnapshot {
 
 #[derive(Serialize)]
 struct ProcessOverviewItem {
+    pid: i32,
     name: String,
     cpu: f32,
     memory: String,
+}
+
+#[derive(Serialize)]
+struct ProcessDetail {
+    pid: i32,
+    name: String,
+    cpu: String,
+    memory: String,
+    status: String,
+    exe: Option<String>,
 }
 
 #[tauri::command]
@@ -93,6 +104,7 @@ fn get_process_overview() -> Vec<ProcessOverviewItem> {
         .processes()
         .values()
         .map(|process| ProcessOverviewItem {
+            pid: process.pid().as_u32() as i32,
             name: process.name().to_string(),
             cpu: process.cpu_usage(),
             memory: format!("{:.1} MB", process.memory() as f32 / 1024.0),
@@ -104,11 +116,30 @@ fn get_process_overview() -> Vec<ProcessOverviewItem> {
     processes
 }
 
+#[tauri::command]
+fn get_process_detail(pid: i32) -> Option<ProcessDetail> {
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    let target = system.process(Pid::from(pid as usize))?;
+    let exe = target.exe().map(|path| path.display().to_string());
+
+    Some(ProcessDetail {
+        pid,
+        name: target.name().to_string(),
+        cpu: format!("{:.0}%", target.cpu_usage()),
+        memory: format!("{:.1} MB", target.memory() as f32 / 1024.0),
+        status: format!("{:?}", target.status()),
+        exe,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_monitor_snapshot,
-            get_process_overview
+            get_process_overview,
+            get_process_detail
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");

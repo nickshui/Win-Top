@@ -29,7 +29,32 @@ if (data) {
   const monitorUpdated = document.getElementById("monitor-updated");
   const processList = document.getElementById("process-list");
   const processCount = document.getElementById("process-count");
+  const processDetailName = document.getElementById("process-detail-name");
+  const processDetailPid = document.getElementById("process-detail-pid");
+  const processDetailCpu = document.getElementById("process-detail-cpu");
+  const processDetailMemory = document.getElementById("process-detail-memory");
+  const processDetailStatus = document.getElementById("process-detail-status");
+  const processDetailExe = document.getElementById("process-detail-exe");
   const tauriInvoke = window?.__TAURI__?.invoke;
+
+  const renderProcessDetail = (detail) => {
+    if (!detail) {
+      processDetailName.textContent = "--";
+      processDetailPid.textContent = "--";
+      processDetailCpu.textContent = "--";
+      processDetailMemory.textContent = "--";
+      processDetailStatus.textContent = "--";
+      processDetailExe.textContent = "--";
+      return;
+    }
+
+    processDetailName.textContent = detail.name;
+    processDetailPid.textContent = detail.pid;
+    processDetailCpu.textContent = detail.cpu;
+    processDetailMemory.textContent = detail.memory;
+    processDetailStatus.textContent = detail.status;
+    processDetailExe.textContent = detail.exe || "--";
+  };
 
   const renderProcessRows = (items) => {
     processList.innerHTML = "";
@@ -37,6 +62,8 @@ if (data) {
 
     items.forEach((item) => {
       const row = document.createElement("li");
+      row.className = "process-row";
+      row.dataset.pid = item.pid;
 
       const name = document.createElement("span");
       name.className = "list-name";
@@ -118,17 +145,43 @@ if (data) {
   fetchMonitorSnapshot();
   setInterval(fetchMonitorSnapshot, 3000);
 
+  const fetchProcessDetail = async (pid) => {
+    if (!pid) {
+      renderProcessDetail(null);
+      return;
+    }
+
+    if (!tauriInvoke) {
+      renderProcessDetail(data.processDetails[pid]);
+      return;
+    }
+
+    const detail = await tauriInvoke("get_process_detail", { pid: Number(pid) });
+    renderProcessDetail(detail);
+  };
+
   const fetchProcessOverview = async () => {
     if (!tauriInvoke) {
       renderProcessRows(data.processOverview);
+      fetchProcessDetail(data.processOverview[0]?.pid);
       return;
     }
 
     const processes = await tauriInvoke("get_process_overview");
     renderProcessRows(processes);
+    fetchProcessDetail(processes[0]?.pid);
   };
 
   fetchProcessOverview();
+
+  processList.addEventListener("click", (event) => {
+    const target = event.target.closest(".process-row");
+    if (!target) {
+      return;
+    }
+
+    fetchProcessDetail(target.dataset.pid);
+  });
 }
 
 const banner = document.createElement("div");

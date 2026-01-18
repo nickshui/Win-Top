@@ -93,6 +93,39 @@
               </header>
               <div class="process-meta">总进程数：<span id="process-count">--</span></div>
               <ul class="list" id="process-list"></ul>
+              <div class="process-detail">
+                <div class="process-detail-title">进程详情</div>
+                <div class="process-detail-grid">
+                  <div>
+                    <div class="detail-label">名称</div>
+                    <div class="detail-value" id="process-detail-name">--</div>
+                  </div>
+                  <div>
+                    <div class="detail-label">PID</div>
+                    <div class="detail-value" id="process-detail-pid">--</div>
+                  </div>
+                  <div>
+                    <div class="detail-label">CPU</div>
+                    <div class="detail-value" id="process-detail-cpu">--</div>
+                  </div>
+                  <div>
+                    <div class="detail-label">内存</div>
+                    <div class="detail-value" id="process-detail-memory">--</div>
+                  </div>
+                  <div>
+                    <div class="detail-label">状态</div>
+                    <div class="detail-value" id="process-detail-status">--</div>
+                  </div>
+                  <div>
+                    <div class="detail-label">路径</div>
+                    <div class="detail-value detail-path" id="process-detail-exe">--</div>
+                  </div>
+                </div>
+                <div class="process-actions">
+                  <button class="ghost" disabled>结束进程</button>
+                  <button class="ghost" disabled>设置优先级</button>
+                </div>
+              </div>
             </article>
             <article class="panel">
               <header>

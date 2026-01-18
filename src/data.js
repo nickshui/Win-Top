@@ -29,8 +29,34 @@ window.dashboardData = {
     { label: "网络占用", value: 0.35, display: "35%" }
   ],
   processOverview: [
-    { name: "Chrome", cpu: 14, memory: "1.6 GB" },
-    { name: "Visual Studio Code", cpu: 9, memory: "980 MB" },
-    { name: "Docker Desktop", cpu: 5, memory: "1.2 GB" }
-  ]
+    { pid: 2316, name: "Chrome", cpu: 14, memory: "1.6 GB" },
+    { pid: 1048, name: "Visual Studio Code", cpu: 9, memory: "980 MB" },
+    { pid: 412, name: "Docker Desktop", cpu: 5, memory: "1.2 GB" }
+  ],
+  processDetails: {
+    "2316": {
+      pid: 2316,
+      name: "Chrome",
+      cpu: "14%",
+      memory: "1.6 GB",
+      status: "Running",
+      exe: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    },
+    "1048": {
+      pid: 1048,
+      name: "Visual Studio Code",
+      cpu: "9%",
+      memory: "980 MB",
+      status: "Running",
+      exe: "C:\\Users\\dev\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+    },
+    "412": {
+      pid: 412,
+      name: "Docker Desktop",
+      cpu: "5%",
+      memory: "1.2 GB",
+      status: "Running",
+      exe: "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe"
+    }
+  }
 };
