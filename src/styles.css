@@ -484,6 +484,31 @@ body {
   white-space: pre-wrap;
 }
 
+.tool-log-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #7f8898;
+}
+
+.tool-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #fbbf24;
+}
+
+.tool-badge--ok {
+  color: #34d399;
+}
+
+.tool-command {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #8f97a6;
+}
+
 .assistant {
   display: flex;
   flex-direction: column;

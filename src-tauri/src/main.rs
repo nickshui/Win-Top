@@ -54,6 +54,7 @@ struct ToolboxItem {
     name: String,
     description: String,
     command: String,
+    requires_admin: bool,
 }
 
 #[tauri::command]
@@ -219,36 +220,84 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
             name: "网络诊断".to_string(),
             description: "执行基础网络诊断与修复命令。".to_string(),
             command: "ipconfig /flushdns".to_string(),
+            requires_admin: true,
         },
         ToolboxItem {
             id: "disk-clean".to_string(),
             name: "磁盘清理".to_string(),
             description: "清理临时文件并释放空间。".to_string(),
             command: "cleanmgr".to_string(),
+            requires_admin: false,
         },
         ToolboxItem {
             id: "system-repair".to_string(),
             name: "系统修复".to_string(),
             description: "扫描并修复系统文件。".to_string(),
             command: "sfc /scannow".to_string(),
+            requires_admin: true,
         },
         ToolboxItem {
             id: "free-port".to_string(),
             name: "释放端口".to_string(),
             description: "查找并释放占用端口的进程。".to_string(),
             command: "netstat -ano".to_string(),
+            requires_admin: false,
         },
     ]
 }
 
 #[tauri::command]
 fn run_toolbox_command(id: String) -> ActionResult {
-    ActionResult {
-        success: false,
-        message: format!(
-            "命令已记录（{}），执行引擎待实现，需要管理员权限策略。",
-            id
-        ),
+    let tools = get_toolbox_items();
+    let tool = match tools.into_iter().find(|item| item.id == id) {
+        Some(tool) => tool,
+        None => {
+            return ActionResult {
+                success: false,
+                message: "未找到该命令。".to_string(),
+            }
+        }
+    };
+
+    if tool.requires_admin {
+        return ActionResult {
+            success: false,
+            message: "该命令需要管理员权限，请以管理员身份运行 Win-Top。".to_string(),
+        };
+    }
+
+    let output = std::process::Command::new("cmd")
+        .args(["/C", &tool.command])
+        .output();
+
+    match output {
+        Ok(result) => {
+            if result.status.success() {
+                let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+                ActionResult {
+                    success: true,
+                    message: format!("执行成功：{}{}", tool.command, format_output(&stdout)),
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+                ActionResult {
+                    success: false,
+                    message: format!("执行失败：{}{}", tool.command, format_output(&stderr)),
+                }
+            }
+        }
+        Err(error) => ActionResult {
+            success: false,
+            message: format!("执行失败：无法启动命令（{}）。", error),
+        },
+    }
+}
+
+fn format_output(output: &str) -> String {
+    if output.is_empty() {
+        "".to_string()
+    } else {
+        format!("\n{}", output)
     }
 }
 

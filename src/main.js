@@ -42,6 +42,7 @@ if (data) {
   const toolGrid = document.getElementById("tool-grid");
   const toolCount = document.getElementById("tool-count");
   const toolLog = document.getElementById("tool-log");
+  const toolHint = document.getElementById("tool-hint");
   const modal = document.getElementById("confirm-modal");
   const modalTitle = document.getElementById("modal-title");
   const modalBody = document.getElementById("modal-body");
@@ -143,7 +144,10 @@ if (data) {
     items.forEach((item) => {
       const card = document.createElement("button");
       card.className = "tool";
-      card.innerHTML = `<strong>${item.name}</strong><br /><span>${item.description}</span>`;
+      const badge = item.requiresAdmin
+        ? `<span class="tool-badge">需要管理员权限</span>`
+        : `<span class="tool-badge tool-badge--ok">普通权限</span>`;
+      card.innerHTML = `<strong>${item.name}</strong><br /><span>${item.description}</span><span class="tool-command">${item.command}</span>${badge}`;
       card.addEventListener("click", () => {
         executeToolCommand(item);
       });
@@ -152,7 +156,8 @@ if (data) {
   };
 
   const updateToolLog = (message) => {
-    toolLog.textContent = message;
+    const timestamp = new Date().toLocaleTimeString();
+    toolLog.textContent = `[${timestamp}] ${message}`;
   };
 
   const renderMonitorRows = (overview, updatedAt) => {
@@ -255,11 +260,13 @@ if (data) {
   const fetchToolbox = async () => {
     if (!tauriInvoke) {
       renderToolCards(data.toolbox);
+      toolHint.textContent = "提示：当前为静态模式，命令不会实际执行。";
       return;
     }
 
     const tools = await tauriInvoke("get_toolbox_items");
     renderToolCards(tools);
+    toolHint.textContent = "提示：请谨慎执行系统命令。";
   };
 
   const executeToolCommand = async (tool) => {
