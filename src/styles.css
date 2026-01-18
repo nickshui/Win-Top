@@ -313,6 +313,48 @@ body {
   gap: 10px;
 }
 
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 17, 21, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-content {
+  width: 360px;
+  background: #121721;
+  border-radius: 16px;
+  border: 1px solid #1f2430;
+  padding: 20px;
+  display: grid;
+  gap: 12px;
+}
+
+.modal-content h4 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.modal-content p {
+  margin: 0;
+  color: #9aa3b2;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .monitor-list {
   display: grid;
   gap: 12px;

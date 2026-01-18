@@ -131,12 +131,31 @@ fn get_process_detail(pid: u32) -> Option<ProcessDetail> {
     })
 }
 
+#[tauri::command]
+fn terminate_process(pid: u32) -> bool {
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    system
+        .processes()
+        .get(&sysinfo::Pid::from_u32(pid))
+        .map(|process| process.kill())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_process_priority(_pid: u32, _level: String) -> bool {
+    false
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_monitor_snapshot,
             get_process_overview,
-            get_process_detail
+            get_process_detail,
+            terminate_process,
+            set_process_priority
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");

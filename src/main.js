@@ -34,7 +34,33 @@ if (data) {
   const detailCpu = document.getElementById("detail-cpu");
   const detailMemory = document.getElementById("detail-memory");
   const detailPath = document.getElementById("detail-path");
+  const terminateButton = document.getElementById("terminate-process");
+  const priorityButton = document.getElementById("set-priority");
+  const modal = document.getElementById("confirm-modal");
+  const modalTitle = document.getElementById("modal-title");
+  const modalBody = document.getElementById("modal-body");
+  const modalCancel = document.getElementById("modal-cancel");
+  const modalConfirm = document.getElementById("modal-confirm");
   const tauriInvoke = window?.__TAURI__?.invoke;
+
+  const openModal = ({ title, body, onConfirm }) => {
+    modalTitle.textContent = title;
+    modalBody.textContent = body;
+    modal.classList.remove("hidden");
+
+    const confirmHandler = () => {
+      onConfirm();
+      closeModal();
+    };
+
+    modalConfirm.addEventListener("click", confirmHandler, { once: true });
+  };
+
+  const closeModal = () => {
+    modal.classList.add("hidden");
+  };
+
+  modalCancel.addEventListener("click", closeModal);
 
   const renderProcessDetail = (detail) => {
     detailName.textContent = detail.name;
@@ -160,8 +186,48 @@ if (data) {
     renderProcessDetail(detail);
   };
 
+  const terminateProcess = async () => {
+    const pid = Number(detailPid.textContent);
+    if (!tauriInvoke) {
+      alert(`已触发结束进程（模拟），PID: ${pid}`);
+      return;
+    }
+
+    const result = await tauriInvoke("terminate_process", { pid });
+    alert(result ? "进程已结束" : "进程结束失败");
+  };
+
+  const setPriority = async () => {
+    const pid = Number(detailPid.textContent);
+    const current = data.processActions.priority.current;
+    const next = data.processActions.priority.options.find((option) => option !== current);
+    if (!tauriInvoke) {
+      alert(`已模拟设置优先级为 ${next}，PID: ${pid}`);
+      return;
+    }
+
+    const result = await tauriInvoke("set_process_priority", { pid, level: next });
+    alert(result ? `优先级已设置为 ${next}` : "设置优先级失败");
+  };
+
   fetchProcessOverview();
   fetchProcessDetail(data.processDetail.pid);
+
+  terminateButton.addEventListener("click", () => {
+    openModal({
+      title: "结束进程确认",
+      body: `将结束进程 ${detailName.textContent}（PID ${detailPid.textContent}）。该操作可能导致数据丢失。`,
+      onConfirm: terminateProcess
+    });
+  });
+
+  priorityButton.addEventListener("click", () => {
+    openModal({
+      title: "设置优先级确认",
+      body: `将调整进程 ${detailName.textContent}（PID ${detailPid.textContent}）的优先级。`,
+      onConfirm: setPriority
+    });
+  });
 }
 
 const banner = document.createElement("div");

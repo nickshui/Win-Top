@@ -39,5 +39,11 @@ window.dashboardData = {
     cpu: "14%",
     memory: "1.6 GB",
     path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  },
+  processActions: {
+    priority: {
+      current: "普通",
+      options: ["低", "普通", "高", "实时"]
+    }
   }
 };

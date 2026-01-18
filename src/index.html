@@ -121,8 +121,8 @@
                   <span class="detail-value" id="detail-path">--</span>
                 </div>
                 <div class="detail-actions">
-                  <button class="ghost">设置优先级</button>
-                  <button class="primary">结束进程</button>
+                  <button class="ghost" id="set-priority">设置优先级</button>
+                  <button class="primary" id="terminate-process">结束进程</button>
                 </div>
               </div>
             </article>
@@ -183,6 +183,16 @@
             <button class="ghost">打开工具箱</button>
           </div>
         </aside>
+      </div>
+    </div>
+    <div class="modal hidden" id="confirm-modal">
+      <div class="modal-content">
+        <h4 id="modal-title">确认操作</h4>
+        <p id="modal-body">--</p>
+        <div class="modal-actions">
+          <button class="ghost" id="modal-cancel">取消</button>
+          <button class="primary" id="modal-confirm">确认</button>
+        </div>
       </div>
     </div>
     <script src="./data.js"></script>
