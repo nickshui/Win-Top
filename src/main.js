@@ -43,6 +43,12 @@ if (data) {
   const toolCount = document.getElementById("tool-count");
   const toolLog = document.getElementById("tool-log");
   const toolHint = document.getElementById("tool-hint");
+  const aiModel = document.getElementById("ai-model");
+  const aiProvider = document.getElementById("ai-provider");
+  const aiCliList = document.getElementById("ai-cli-list");
+  const aiCliLog = document.getElementById("ai-cli-log");
+  const aiCliNew = document.getElementById("ai-cli-new");
+  const aiCliConfig = document.getElementById("ai-cli-config");
   const modal = document.getElementById("confirm-modal");
   const modalTitle = document.getElementById("modal-title");
   const modalBody = document.getElementById("modal-body");
@@ -159,6 +165,30 @@ if (data) {
   const updateToolLog = (message) => {
     const timestamp = new Date().toLocaleTimeString();
     toolLog.textContent = `[${timestamp}] ${message}`;
+  };
+
+  const renderAiCliSessions = (dataSource) => {
+    aiModel.textContent = dataSource.model;
+    aiProvider.textContent = dataSource.provider;
+    aiCliList.innerHTML = "";
+
+    dataSource.sessions.forEach((session, index) => {
+      const row = document.createElement("div");
+      row.className = "ai-cli-session";
+      if (index === 0) {
+        row.classList.add("active");
+        aiCliLog.textContent = session.transcript.join("\n");
+      }
+      row.innerHTML = `<span>${session.title}</span><span>${session.updatedAt}</span>`;
+      row.addEventListener("click", () => {
+        document.querySelectorAll(".ai-cli-session").forEach((item) => {
+          item.classList.remove("active");
+        });
+        row.classList.add("active");
+        aiCliLog.textContent = session.transcript.join("\n");
+      });
+      aiCliList.appendChild(row);
+    });
   };
 
   const renderMonitorRows = (overview, updatedAt) => {
@@ -316,6 +346,7 @@ if (data) {
   fetchProcessDetail(data.processDetail.pid);
   fetchPortOverview();
   fetchToolbox();
+  renderAiCliSessions(data.aiCli);
 
   terminateButton.addEventListener("click", () => {
     openModal({
@@ -331,6 +362,14 @@ if (data) {
       body: `将调整进程 ${detailName.textContent}（PID ${detailPid.textContent}）的优先级。`,
       onConfirm: setPriority
     });
+  });
+
+  aiCliNew.addEventListener("click", () => {
+    updateToolLog("AI CLI：新建会话功能待实现。");
+  });
+
+  aiCliConfig.addEventListener("click", () => {
+    updateToolLog("AI CLI：模型配置入口待实现。");
   });
 }
 

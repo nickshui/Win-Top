@@ -84,5 +84,29 @@ window.dashboardData = {
       requiresAdmin: false,
       shell: "powershell"
     }
-  ]
+  ],
+  aiCli: {
+    provider: "OpenAI-Compatible",
+    model: "gpt-4o-mini",
+    sessions: [
+      {
+        id: "session-1",
+        title: "端口占用分析",
+        updatedAt: "09:42",
+        transcript: [
+          "> 查找占用 3000 端口的进程",
+          "建议：执行 `netstat -ano | findstr 3000` 获取 PID。"
+        ]
+      },
+      {
+        id: "session-2",
+        title: "系统性能诊断",
+        updatedAt: "10:15",
+        transcript: [
+          "> 电脑运行缓慢",
+          "建议：检查 CPU/内存占用，并关闭高占用进程。"
+        ]
+      }
+    ]
+  }
 };

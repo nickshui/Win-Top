@@ -536,6 +536,70 @@ body {
   line-height: 1.6;
 }
 
+.ai-cli {
+  gap: 14px;
+}
+
+.ai-cli-config {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #9aa3b2;
+}
+
+.ai-config-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(17, 20, 27, 0.7);
+  border: 1px solid #1f2430;
+}
+
+.ai-cli-title {
+  font-size: 12px;
+  color: #9aa3b2;
+  margin-bottom: 6px;
+}
+
+.ai-cli-list {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-cli-session {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(17, 20, 27, 0.7);
+  border: 1px solid #1f2430;
+  cursor: pointer;
+  font-size: 12px;
+  color: #cbd5f5;
+}
+
+.ai-cli-session.active {
+  border-color: rgba(99, 102, 241, 0.5);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.2);
+}
+
+.ai-cli-body {
+  margin: 0;
+  font-size: 12px;
+  color: #e5e7eb;
+  white-space: pre-wrap;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.ai-cli-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
 .dev-banner {
   position: fixed;
   bottom: 20px;

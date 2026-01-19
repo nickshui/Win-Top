@@ -172,6 +172,31 @@
             <p>快速执行常用的 Windows 命令，并查看解释与风险提示。</p>
             <button class="ghost">打开工具箱</button>
           </div>
+          <div class="assistant-card ai-cli" id="ai-cli-panel">
+            <h4>AI CLI 会话</h4>
+            <div class="ai-cli-config">
+              <div class="ai-config-item">
+                <span>模型</span>
+                <span id="ai-model">--</span>
+              </div>
+              <div class="ai-config-item">
+                <span>接入方式</span>
+                <span id="ai-provider">--</span>
+              </div>
+            </div>
+            <div class="ai-cli-sessions">
+              <div class="ai-cli-title">会话列表</div>
+              <div class="ai-cli-list" id="ai-cli-list"></div>
+            </div>
+            <div class="ai-cli-log">
+              <div class="ai-cli-title">会话记录</div>
+              <pre class="ai-cli-body" id="ai-cli-log">选择会话以查看记录…</pre>
+            </div>
+            <div class="ai-cli-actions">
+              <button class="ghost" id="ai-cli-config">配置模型</button>
+              <button class="primary" id="ai-cli-new">新建会话</button>
+            </div>
+          </div>
         </aside>
       </div>
     </div>
