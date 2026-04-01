@@ -2,6 +2,7 @@
 
 use chrono::Local;
 use serde::Serialize;
+use std::sync::{LazyLock, Mutex};
 use sysinfo::{DiskExt, NetworkExt, ProcessExt, System, SystemExt};
 
 #[derive(Serialize)]
@@ -38,6 +39,37 @@ struct ProcessDetail {
 struct ActionResult {
     success: bool,
     message: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ActionLogEntry {
+    timestamp: String,
+    module: String,
+    action: String,
+    target: String,
+    success: bool,
+    message: String,
+}
+
+static ACTION_LOGS: LazyLock<Mutex<Vec<ActionLogEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn append_action_log(module: &str, action: &str, target: &str, success: bool, message: &str) {
+    let entry = ActionLogEntry {
+        timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        module: module.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        success,
+        message: message.to_string(),
+    };
+
+    if let Ok(mut logs) = ACTION_LOGS.lock() {
+        logs.push(entry);
+        if logs.len() > 500 {
+            let overflow = logs.len() - 500;
+            logs.drain(0..overflow);
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -160,7 +192,7 @@ fn terminate_process(pid: u32) -> ActionResult {
     let mut system = System::new_all();
     system.refresh_all();
 
-    match system.processes().get(&sysinfo::Pid::from_u32(pid)) {
+    let result = match system.processes().get(&sysinfo::Pid::from_u32(pid)) {
         Some(process) => {
             if process.kill() {
                 ActionResult {
@@ -178,15 +210,35 @@ fn terminate_process(pid: u32) -> ActionResult {
             success: false,
             message: "未找到进程或已退出。".to_string(),
         },
-    }
+    };
+
+    append_action_log(
+        "process",
+        "terminate_process",
+        &format!("pid:{}", pid),
+        result.success,
+        &result.message,
+    );
+
+    result
 }
 
 #[tauri::command]
 fn set_process_priority(_pid: u32, _level: String) -> ActionResult {
-    ActionResult {
+    let result = ActionResult {
         success: false,
         message: "设置优先级暂未实现，需要管理员权限策略与平台适配。".to_string(),
-    }
+    };
+
+    append_action_log(
+        "process",
+        "set_process_priority",
+        &format!("pid:{}", _pid),
+        result.success,
+        &result.message,
+    );
+
+    result
 }
 
 #[tauri::command]
@@ -257,18 +309,28 @@ fn run_toolbox_command(id: String) -> ActionResult {
     let tool = match tools.into_iter().find(|item| item.id == id) {
         Some(tool) => tool,
         None => {
-            return ActionResult {
+            let result = ActionResult {
                 success: false,
                 message: "未找到该命令。".to_string(),
-            }
+            };
+            append_action_log("toolbox", "run_toolbox_command", &id, result.success, &result.message);
+            return result;
         }
     };
 
     if tool.requires_admin {
-        return ActionResult {
+        let result = ActionResult {
             success: false,
             message: "该命令需要管理员权限，请以管理员身份运行 Win-Top。".to_string(),
         };
+        append_action_log(
+            "toolbox",
+            "run_toolbox_command",
+            &tool.id,
+            result.success,
+            &result.message,
+        );
+        return result;
     }
 
     let output = match tool.shell.as_str() {
@@ -280,7 +342,7 @@ fn run_toolbox_command(id: String) -> ActionResult {
             .output(),
     };
 
-    match output {
+    let result = match output {
         Ok(result) => {
             if result.status.success() {
                 let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
@@ -310,6 +372,76 @@ fn run_toolbox_command(id: String) -> ActionResult {
             success: false,
             message: format!("执行失败：无法启动命令（{}）。", error),
         },
+    };
+
+    append_action_log(
+        "toolbox",
+        "run_toolbox_command",
+        &tool.id,
+        result.success,
+        &result.message,
+    );
+
+    result
+}
+
+#[tauri::command]
+fn get_action_logs() -> Vec<ActionLogEntry> {
+    ACTION_LOGS
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_else(|_| Vec::new())
+}
+
+#[tauri::command]
+fn export_action_logs(format: String) -> ActionResult {
+    let logs = ACTION_LOGS
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_else(|_| Vec::new());
+
+    if logs.is_empty() {
+        return ActionResult {
+            success: false,
+            message: "暂无可导出的日志。".to_string(),
+        };
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let path = match format.as_str() {
+        "csv" => std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(format!("win_top_logs_{}.csv", timestamp)),
+        _ => std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(format!("win_top_logs_{}.json", timestamp)),
+    };
+
+    let write_result = if format == "csv" {
+        let mut output = String::from("timestamp,module,action,target,success,message\n");
+        for item in &logs {
+            let escaped = item.message.replace('"', "''").replace(',', "，");
+            output.push_str(&format!(
+                "{},{},{},{},{},\"{}\"\n",
+                item.timestamp, item.module, item.action, item.target, item.success, escaped
+            ));
+        }
+        std::fs::write(&path, output)
+    } else {
+        serde_json::to_string_pretty(&logs)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|body| std::fs::write(&path, body))
+    };
+
+    match write_result {
+        Ok(_) => ActionResult {
+            success: true,
+            message: format!("日志已导出到 {}", path.display()),
+        },
+        Err(error) => ActionResult {
+            success: false,
+            message: format!("日志导出失败：{}", error),
+        },
     }
 }
 
@@ -331,7 +463,9 @@ fn main() {
             set_process_priority,
             get_port_overview,
             get_toolbox_items,
-            run_toolbox_command
+            run_toolbox_command,
+            get_action_logs,
+            export_action_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
