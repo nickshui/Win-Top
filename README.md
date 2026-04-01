@@ -174,3 +174,4 @@ Win-Top 将成为 Windows 端最专业、最智能、最可扩展的资源管理
 - [需求文档](docs/requirements.md)
 - [技术规范](docs/tech-spec.md)
 - [执行计划](docs/plan.md)
+- [构建环境说明](docs/build-env.md)
