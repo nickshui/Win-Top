@@ -3,7 +3,7 @@
 use chrono::Local;
 use serde::Serialize;
 use std::sync::{LazyLock, Mutex};
-use sysinfo::{DiskExt, NetworkExt, ProcessExt, System, SystemExt};
+use sysinfo::{Disks, Networks, System};
 
 #[derive(Serialize)]
 struct MonitorOverviewItem {
@@ -90,7 +90,7 @@ struct ToolboxItem {
     shell: String,
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_monitor_snapshot() -> MonitorSnapshot {
     let mut system = System::new_all();
     system.refresh_all();
@@ -104,9 +104,10 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
         0.0
     };
 
-    let (total_disk, available_disk) = system
-        .disks()
+    let disks = Disks::new_with_refreshed_list();
+    let (total_disk, available_disk) = disks
         .iter()
+        .filter(|disk| !disk.is_removable())
         .fold((0u64, 0u64), |acc, disk| {
             (acc.0 + disk.total_space(), acc.1 + disk.available_space())
         });
@@ -116,8 +117,8 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
         0.0
     };
 
-    let total_network_bytes: u64 = system
-        .networks()
+    let networks = Networks::new_with_refreshed_list();
+    let total_network_bytes: u64 = networks
         .iter()
         .map(|(_, data)| data.received() + data.transmitted())
         .sum();
@@ -150,7 +151,7 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_process_overview() -> Vec<ProcessOverviewItem> {
     let mut system = System::new_all();
     system.refresh_all();
@@ -171,7 +172,7 @@ fn get_process_overview() -> Vec<ProcessOverviewItem> {
     processes
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_process_detail(pid: u32) -> Option<ProcessDetail> {
     let mut system = System::new_all();
     system.refresh_all();
@@ -182,12 +183,15 @@ fn get_process_detail(pid: u32) -> Option<ProcessDetail> {
             name: process.name().to_string(),
             cpu: format!("{:.0}%", process.cpu_usage()),
             memory: format!("{:.1} MB", process.memory() as f32 / 1024.0),
-            path: process.exe().to_string_lossy().to_string(),
+            path: process
+                .exe()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| "-".to_string()),
         }
     })
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn terminate_process(pid: u32) -> ActionResult {
     let mut system = System::new_all();
     system.refresh_all();
@@ -223,7 +227,7 @@ fn terminate_process(pid: u32) -> ActionResult {
     result
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn set_process_priority(_pid: u32, _level: String) -> ActionResult {
     let result = ActionResult {
         success: false,
@@ -241,7 +245,7 @@ fn set_process_priority(_pid: u32, _level: String) -> ActionResult {
     result
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_port_overview() -> Vec<PortOverviewItem> {
     vec![
         PortOverviewItem {
@@ -265,7 +269,7 @@ fn get_port_overview() -> Vec<PortOverviewItem> {
     ]
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_toolbox_items() -> Vec<ToolboxItem> {
     vec![
         ToolboxItem {
@@ -303,7 +307,7 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
     ]
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn run_toolbox_command(id: String) -> ActionResult {
     let tools = get_toolbox_items();
     let tool = match tools.into_iter().find(|item| item.id == id) {
@@ -385,7 +389,7 @@ fn run_toolbox_command(id: String) -> ActionResult {
     result
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_action_logs() -> Vec<ActionLogEntry> {
     ACTION_LOGS
         .lock()
@@ -393,7 +397,7 @@ fn get_action_logs() -> Vec<ActionLogEntry> {
         .unwrap_or_else(|_| Vec::new())
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn export_action_logs(format: String) -> ActionResult {
     let logs = ACTION_LOGS
         .lock()
@@ -453,6 +457,7 @@ fn format_output(output: &str) -> String {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -469,4 +474,9 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    println!("Win-Top 仅支持 Windows 运行。当前环境可用于代码检查。");
 }
