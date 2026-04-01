@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Win-Top</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <div>
+            <div class="brand-title">Win-Top</div>
+            <div class="brand-subtitle">Windows 智能资源管理工作台</div>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <input class="search" placeholder="搜索进程、端口、命令" />
+          <button class="primary">AI 助手</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <aside class="sidebar">
+          <nav>
+            <a class="nav-item active">概览</a>
+            <a class="nav-item">资源监控</a>
+            <a class="nav-item">进程管理</a>
+            <a class="nav-item">网络与端口</a>
+            <a class="nav-item">磁盘管理</a>
+            <a class="nav-item">工具箱</a>
+            <a class="nav-item">AI 助手</a>
+          </nav>
+          <div class="sidebar-footer">
+            <span class="status-dot"></span>
+            <span>系统状态正常</span>
+          </div>
+        </aside>
+
+        <main class="dashboard">
+          <section class="cards">
+            <article class="card">
+              <div class="card-title">CPU 使用率</div>
+              <div class="card-value" id="cpu-value">--</div>
+              <div class="card-sub" id="cpu-sub">--</div>
+            </article>
+            <article class="card">
+              <div class="card-title">内存占用</div>
+              <div class="card-value" id="memory-value">--</div>
+              <div class="card-sub" id="memory-sub">--</div>
+            </article>
+            <article class="card">
+              <div class="card-title">网络流量</div>
+              <div class="card-value" id="network-value">--</div>
+              <div class="card-sub" id="network-sub">--</div>
+            </article>
+          </section>
+
+          <section class="panel-grid">
+            <article class="panel ai-checkup">
+              <header>
+                <h3>AI 体检</h3>
+                <button class="ghost">开始体检</button>
+              </header>
+              <div class="ai-checkup-body">
+                <div class="ai-checkup-score">
+                  <div class="score-label">综合评分</div>
+                  <div class="score-value" id="ai-score">--</div>
+                  <div class="score-sub" id="ai-score-sub">--</div>
+                </div>
+                <div class="ai-checkup-list">
+                  <div class="ai-checkup-item">
+                    <span id="ai-issue-1">--</span>
+                    <span class="tag warning" id="ai-issue-1-tag">--</span>
+                  </div>
+                  <div class="ai-checkup-item">
+                    <span id="ai-issue-2">--</span>
+                    <span class="tag success" id="ai-issue-2-tag">--</span>
+                  </div>
+                  <div class="ai-checkup-item">
+                    <span id="ai-issue-3">--</span>
+                    <span class="tag warning" id="ai-issue-3-tag">--</span>
+                  </div>
+                </div>
+              </div>
+            </article>
+            <article class="panel">
+              <header>
+                <h3>进程资源占用</h3>
+                <button class="ghost">查看全部</button>
+              </header>
+              <div class="process-meta">总进程数：<span id="process-count">--</span></div>
+              <ul class="list" id="process-list"></ul>
+            </article>
+            <article class="panel">
+              <header>
+                <h3>进程详情</h3>
+                <button class="ghost">查看全部</button>
+              </header>
+              <div class="process-detail" id="process-detail">
+                <div class="detail-row">
+                  <span class="detail-label">名称</span>
+                  <span class="detail-value" id="detail-name">--</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">PID</span>
+                  <span class="detail-value" id="detail-pid">--</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">CPU</span>
+                  <span class="detail-value" id="detail-cpu">--</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">内存</span>
+                  <span class="detail-value" id="detail-memory">--</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">路径</span>
+                  <span class="detail-value" id="detail-path">--</span>
+                </div>
+                <div class="detail-actions">
+                  <button class="ghost" id="set-priority">设置优先级</button>
+                  <button class="primary" id="terminate-process">结束进程</button>
+                </div>
+                <div class="detail-status" id="process-status">等待操作…</div>
+              </div>
+            </article>
+            <article class="panel">
+              <header>
+                <h3>资源监控概览</h3>
+                <button class="ghost">查看趋势</button>
+              </header>
+              <div class="monitor-meta">最近刷新：<span id="monitor-updated">--</span></div>
+              <div class="monitor-list" id="monitor-list"></div>
+            </article>
+
+            <article class="panel">
+              <header>
+                <h3>端口与连接</h3>
+                <button class="ghost">查看详情</button>
+              </header>
+              <div class="port-meta">活跃端口：<span id="port-count">--</span></div>
+              <div class="port-list" id="port-list"></div>
+            </article>
+
+            <article class="panel">
+              <header>
+                <h3>工具箱</h3>
+                <button class="ghost">管理脚本</button>
+              </header>
+              <div class="tool-meta">可用命令：<span id="tool-count">--</span></div>
+              <div class="tool-grid" id="tool-grid"></div>
+              <div class="tool-log">
+                <div class="tool-log-title">执行日志</div>
+                <pre class="tool-log-body" id="tool-log">等待执行命令…</pre>
+                <div class="tool-log-hint" id="tool-hint">提示：部分命令需要管理员权限。</div>
+              </div>
+            </article>
+          </section>
+        </main>
+
+        <aside class="assistant">
+          <div class="assistant-card">
+            <h4>AI 今日建议</h4>
+            <p>检测到内存占用偏高，建议关闭长时间占用的浏览器标签页。</p>
+            <button class="primary">生成优化脚本</button>
+          </div>
+          <div class="assistant-card">
+            <h4>运行命令卡片</h4>
+            <p>快速执行常用的 Windows 命令，并查看解释与风险提示。</p>
+            <button class="ghost">打开工具箱</button>
+          </div>
+          <div class="assistant-card ai-cli" id="ai-cli-panel">
+            <h4>AI CLI 会话</h4>
+            <div class="ai-cli-config">
+              <div class="ai-config-item">
+                <span>模型</span>
+                <span id="ai-model">--</span>
+              </div>
+              <div class="ai-config-item">
+                <span>接入方式</span>
+                <span id="ai-provider">--</span>
+              </div>
+            </div>
+            <div class="ai-cli-sessions">
+              <div class="ai-cli-title">会话列表</div>
+              <div class="ai-cli-list" id="ai-cli-list"></div>
+            </div>
+            <div class="ai-cli-log">
+              <div class="ai-cli-title">会话记录</div>
+              <pre class="ai-cli-body" id="ai-cli-log">选择会话以查看记录…</pre>
+            </div>
+            <div class="ai-cli-actions">
+              <button class="ghost" id="ai-cli-config">配置模型</button>
+              <button class="primary" id="ai-cli-new">新建会话</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <div class="modal hidden" id="confirm-modal">
+      <div class="modal-content">
+        <h4 id="modal-title">确认操作</h4>
+        <p id="modal-body">--</p>
+        <div class="modal-actions">
+          <button class="ghost" id="modal-cancel">取消</button>
+          <button class="primary" id="modal-confirm">确认</button>
+        </div>
+      </div>
+    </div>
+    <script src="./data.js"></script>
+    <script src="./main.js"></script>
+  </body>
+</html>
