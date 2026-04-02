@@ -386,6 +386,21 @@ body {
   margin-bottom: 12px;
 }
 
+.monitor-range {
+  display: flex;
+  gap: 8px;
+}
+
+.monitor-range-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.monitor-range-btn.active {
+  border-color: rgba(99, 102, 241, 0.6);
+  color: #eef2ff;
+}
+
 .monitor-row {
   display: grid;
   grid-template-columns: 120px 1fr 60px;
@@ -418,6 +433,12 @@ body {
 .monitor-value {
   text-align: right;
   color: #9aa3b2;
+}
+
+.monitor-history {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #8f97a6;
 }
 
 .port-item {
@@ -488,6 +509,12 @@ body {
   margin-top: 8px;
   font-size: 11px;
   color: #7f8898;
+}
+
+.tool-log-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
 }
 
 .tool-badge {

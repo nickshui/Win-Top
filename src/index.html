@@ -130,10 +130,15 @@
             <article class="panel">
               <header>
                 <h3>资源监控概览</h3>
-                <button class="ghost">查看趋势</button>
+                <div class="monitor-range">
+                  <button class="ghost monitor-range-btn active" data-range="1">1 分钟</button>
+                  <button class="ghost monitor-range-btn" data-range="5">5 分钟</button>
+                  <button class="ghost monitor-range-btn" data-range="15">15 分钟</button>
+                </div>
               </header>
               <div class="monitor-meta">最近刷新：<span id="monitor-updated">--</span></div>
               <div class="monitor-list" id="monitor-list"></div>
+              <div class="monitor-history" id="monitor-history">趋势：等待数据…</div>
             </article>
 
             <article class="panel">
@@ -156,6 +161,10 @@
                 <div class="tool-log-title">执行日志</div>
                 <pre class="tool-log-body" id="tool-log">等待执行命令…</pre>
                 <div class="tool-log-hint" id="tool-hint">提示：部分命令需要管理员权限。</div>
+                <div class="tool-log-actions">
+                  <button class="ghost" id="view-action-logs">查看操作日志</button>
+                  <button class="ghost" id="export-action-logs">导出日志(JSON)</button>
+                </div>
               </div>
             </article>
           </section>

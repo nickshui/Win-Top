@@ -27,6 +27,8 @@ if (data) {
 
   const monitorList = document.getElementById("monitor-list");
   const monitorUpdated = document.getElementById("monitor-updated");
+  const monitorHistory = document.getElementById("monitor-history");
+  const monitorRangeButtons = Array.from(document.querySelectorAll(".monitor-range-btn"));
   const processList = document.getElementById("process-list");
   const processCount = document.getElementById("process-count");
   const detailName = document.getElementById("detail-name");
@@ -43,6 +45,8 @@ if (data) {
   const toolCount = document.getElementById("tool-count");
   const toolLog = document.getElementById("tool-log");
   const toolHint = document.getElementById("tool-hint");
+  const viewActionLogsButton = document.getElementById("view-action-logs");
+  const exportActionLogsButton = document.getElementById("export-action-logs");
   const aiModel = document.getElementById("ai-model");
   const aiProvider = document.getElementById("ai-provider");
   const aiCliList = document.getElementById("ai-cli-list");
@@ -55,6 +59,13 @@ if (data) {
   const modalCancel = document.getElementById("modal-cancel");
   const modalConfirm = document.getElementById("modal-confirm");
   const tauriInvoke = window?.__TAURI__?.invoke;
+  const monitorHistoryStore = [];
+  const monitorRangeMinutes = {
+    1: 60,
+    5: 300,
+    15: 900
+  };
+  let currentRange = 1;
 
   const openModal = ({ title, body, onConfirm }) => {
     modalTitle.textContent = title;
@@ -223,6 +234,33 @@ if (data) {
     monitorUpdated.textContent = updatedAt;
   };
 
+  const updateMonitorHistory = (overview, updatedAt) => {
+    const snapshot = {
+      time: updatedAt,
+      cpu: overview.find((item) => item.label.includes("CPU"))?.display ?? "--",
+      memory: overview.find((item) => item.label.includes("内存"))?.display ?? "--",
+      disk: overview.find((item) => item.label.includes("磁盘"))?.display ?? "--",
+      network: overview.find((item) => item.label.includes("网络"))?.display ?? "--"
+    };
+    monitorHistoryStore.push(snapshot);
+
+    if (monitorHistoryStore.length > monitorRangeMinutes[15]) {
+      monitorHistoryStore.splice(0, monitorHistoryStore.length - monitorRangeMinutes[15]);
+    }
+    renderMonitorHistory();
+  };
+
+  const renderMonitorHistory = () => {
+    const windowSize = monitorRangeMinutes[currentRange];
+    const visible = monitorHistoryStore.slice(-windowSize);
+    if (visible.length === 0) {
+      monitorHistory.textContent = "趋势：等待数据…";
+      return;
+    }
+    const last = visible[visible.length - 1];
+    monitorHistory.textContent = `趋势(${currentRange}分钟，${visible.length}个样本)：CPU ${last.cpu} · 内存 ${last.memory} · 磁盘 ${last.disk} · 网络 ${last.network}`;
+  };
+
   const formatNow = () => {
     const now = new Date();
     return `${now.getHours().toString().padStart(2, "0")}:${now
@@ -246,16 +284,19 @@ if (data) {
   const fetchMonitorSnapshot = async () => {
     if (!tauriInvoke) {
       randomizeMonitor();
-      renderMonitorRows(data.monitorOverview, formatNow());
+      const currentTime = formatNow();
+      renderMonitorRows(data.monitorOverview, currentTime);
+      updateMonitorHistory(data.monitorOverview, currentTime);
       return;
     }
 
     const snapshot = await tauriInvoke("get_monitor_snapshot");
     renderMonitorRows(snapshot.overview, snapshot.updated_at);
+    updateMonitorHistory(snapshot.overview, snapshot.updated_at);
   };
 
   fetchMonitorSnapshot();
-  setInterval(fetchMonitorSnapshot, 3000);
+  setInterval(fetchMonitorSnapshot, 1000);
 
   const fetchProcessOverview = async () => {
     if (!tauriInvoke) {
@@ -318,6 +359,32 @@ if (data) {
     });
   };
 
+  const refreshActionLogs = async () => {
+    if (!tauriInvoke) {
+      updateToolLog("静态模式下无后端操作日志。");
+      return;
+    }
+    const logs = await tauriInvoke("get_action_logs");
+    if (!logs.length) {
+      updateToolLog("暂无操作日志。");
+      return;
+    }
+    const latest = logs.slice(-5).map((item) => {
+      const status = item.success ? "成功" : "失败";
+      return `[${item.timestamp}] ${item.module}/${item.action}(${item.target}) ${status} - ${item.message}`;
+    });
+    toolLog.textContent = latest.join("\n");
+  };
+
+  const exportActionLogs = async () => {
+    if (!tauriInvoke) {
+      updateToolLog("静态模式下不支持日志导出。");
+      return;
+    }
+    const result = await tauriInvoke("export_action_logs", { format: "json" });
+    updateToolLog(result.message);
+  };
+
   const terminateProcess = async () => {
     const pid = Number(detailPid.textContent);
     if (!tauriInvoke) {
@@ -371,6 +438,18 @@ if (data) {
   aiCliConfig.addEventListener("click", () => {
     updateToolLog("AI CLI：模型配置入口待实现。");
   });
+
+  monitorRangeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      currentRange = Number(button.dataset.range || "1");
+      monitorRangeButtons.forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      renderMonitorHistory();
+    });
+  });
+
+  viewActionLogsButton.addEventListener("click", refreshActionLogs);
+  exportActionLogsButton.addEventListener("click", exportActionLogs);
 }
 
 const banner = document.createElement("div");

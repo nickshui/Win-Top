@@ -2,7 +2,8 @@
 
 use chrono::Local;
 use serde::Serialize;
-use sysinfo::{DiskExt, NetworkExt, ProcessExt, System, SystemExt};
+use std::sync::{LazyLock, Mutex};
+use sysinfo::{Disks, Networks, System};
 
 #[derive(Serialize)]
 struct MonitorOverviewItem {
@@ -40,6 +41,37 @@ struct ActionResult {
     message: String,
 }
 
+#[derive(Serialize, Clone)]
+struct ActionLogEntry {
+    timestamp: String,
+    module: String,
+    action: String,
+    target: String,
+    success: bool,
+    message: String,
+}
+
+static ACTION_LOGS: LazyLock<Mutex<Vec<ActionLogEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn append_action_log(module: &str, action: &str, target: &str, success: bool, message: &str) {
+    let entry = ActionLogEntry {
+        timestamp: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        module: module.to_string(),
+        action: action.to_string(),
+        target: target.to_string(),
+        success,
+        message: message.to_string(),
+    };
+
+    if let Ok(mut logs) = ACTION_LOGS.lock() {
+        logs.push(entry);
+        if logs.len() > 500 {
+            let overflow = logs.len() - 500;
+            logs.drain(0..overflow);
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct PortOverviewItem {
     port: u16,
@@ -58,7 +90,7 @@ struct ToolboxItem {
     shell: String,
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_monitor_snapshot() -> MonitorSnapshot {
     let mut system = System::new_all();
     system.refresh_all();
@@ -72,9 +104,10 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
         0.0
     };
 
-    let (total_disk, available_disk) = system
-        .disks()
+    let disks = Disks::new_with_refreshed_list();
+    let (total_disk, available_disk) = disks
         .iter()
+        .filter(|disk| !disk.is_removable())
         .fold((0u64, 0u64), |acc, disk| {
             (acc.0 + disk.total_space(), acc.1 + disk.available_space())
         });
@@ -84,8 +117,8 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
         0.0
     };
 
-    let total_network_bytes: u64 = system
-        .networks()
+    let networks = Networks::new_with_refreshed_list();
+    let total_network_bytes: u64 = networks
         .iter()
         .map(|(_, data)| data.received() + data.transmitted())
         .sum();
@@ -118,7 +151,7 @@ fn get_monitor_snapshot() -> MonitorSnapshot {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_process_overview() -> Vec<ProcessOverviewItem> {
     let mut system = System::new_all();
     system.refresh_all();
@@ -139,7 +172,7 @@ fn get_process_overview() -> Vec<ProcessOverviewItem> {
     processes
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_process_detail(pid: u32) -> Option<ProcessDetail> {
     let mut system = System::new_all();
     system.refresh_all();
@@ -150,17 +183,20 @@ fn get_process_detail(pid: u32) -> Option<ProcessDetail> {
             name: process.name().to_string(),
             cpu: format!("{:.0}%", process.cpu_usage()),
             memory: format!("{:.1} MB", process.memory() as f32 / 1024.0),
-            path: process.exe().to_string_lossy().to_string(),
+            path: process
+                .exe()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_else(|| "-".to_string()),
         }
     })
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn terminate_process(pid: u32) -> ActionResult {
     let mut system = System::new_all();
     system.refresh_all();
 
-    match system.processes().get(&sysinfo::Pid::from_u32(pid)) {
+    let result = match system.processes().get(&sysinfo::Pid::from_u32(pid)) {
         Some(process) => {
             if process.kill() {
                 ActionResult {
@@ -178,18 +214,38 @@ fn terminate_process(pid: u32) -> ActionResult {
             success: false,
             message: "未找到进程或已退出。".to_string(),
         },
-    }
+    };
+
+    append_action_log(
+        "process",
+        "terminate_process",
+        &format!("pid:{}", pid),
+        result.success,
+        &result.message,
+    );
+
+    result
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn set_process_priority(_pid: u32, _level: String) -> ActionResult {
-    ActionResult {
+    let result = ActionResult {
         success: false,
         message: "设置优先级暂未实现，需要管理员权限策略与平台适配。".to_string(),
-    }
+    };
+
+    append_action_log(
+        "process",
+        "set_process_priority",
+        &format!("pid:{}", _pid),
+        result.success,
+        &result.message,
+    );
+
+    result
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_port_overview() -> Vec<PortOverviewItem> {
     vec![
         PortOverviewItem {
@@ -213,7 +269,7 @@ fn get_port_overview() -> Vec<PortOverviewItem> {
     ]
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn get_toolbox_items() -> Vec<ToolboxItem> {
     vec![
         ToolboxItem {
@@ -251,24 +307,34 @@ fn get_toolbox_items() -> Vec<ToolboxItem> {
     ]
 }
 
-#[tauri::command]
+#[cfg_attr(target_os = "windows", tauri::command)]
 fn run_toolbox_command(id: String) -> ActionResult {
     let tools = get_toolbox_items();
     let tool = match tools.into_iter().find(|item| item.id == id) {
         Some(tool) => tool,
         None => {
-            return ActionResult {
+            let result = ActionResult {
                 success: false,
                 message: "未找到该命令。".to_string(),
-            }
+            };
+            append_action_log("toolbox", "run_toolbox_command", &id, result.success, &result.message);
+            return result;
         }
     };
 
     if tool.requires_admin {
-        return ActionResult {
+        let result = ActionResult {
             success: false,
             message: "该命令需要管理员权限，请以管理员身份运行 Win-Top。".to_string(),
         };
+        append_action_log(
+            "toolbox",
+            "run_toolbox_command",
+            &tool.id,
+            result.success,
+            &result.message,
+        );
+        return result;
     }
 
     let output = match tool.shell.as_str() {
@@ -280,7 +346,7 @@ fn run_toolbox_command(id: String) -> ActionResult {
             .output(),
     };
 
-    match output {
+    let result = match output {
         Ok(result) => {
             if result.status.success() {
                 let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
@@ -310,6 +376,76 @@ fn run_toolbox_command(id: String) -> ActionResult {
             success: false,
             message: format!("执行失败：无法启动命令（{}）。", error),
         },
+    };
+
+    append_action_log(
+        "toolbox",
+        "run_toolbox_command",
+        &tool.id,
+        result.success,
+        &result.message,
+    );
+
+    result
+}
+
+#[cfg_attr(target_os = "windows", tauri::command)]
+fn get_action_logs() -> Vec<ActionLogEntry> {
+    ACTION_LOGS
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_else(|_| Vec::new())
+}
+
+#[cfg_attr(target_os = "windows", tauri::command)]
+fn export_action_logs(format: String) -> ActionResult {
+    let logs = ACTION_LOGS
+        .lock()
+        .map(|logs| logs.clone())
+        .unwrap_or_else(|_| Vec::new());
+
+    if logs.is_empty() {
+        return ActionResult {
+            success: false,
+            message: "暂无可导出的日志。".to_string(),
+        };
+    }
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let path = match format.as_str() {
+        "csv" => std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(format!("win_top_logs_{}.csv", timestamp)),
+        _ => std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(format!("win_top_logs_{}.json", timestamp)),
+    };
+
+    let write_result = if format == "csv" {
+        let mut output = String::from("timestamp,module,action,target,success,message\n");
+        for item in &logs {
+            let escaped = item.message.replace('"', "''").replace(',', "，");
+            output.push_str(&format!(
+                "{},{},{},{},{},\"{}\"\n",
+                item.timestamp, item.module, item.action, item.target, item.success, escaped
+            ));
+        }
+        std::fs::write(&path, output)
+    } else {
+        serde_json::to_string_pretty(&logs)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|body| std::fs::write(&path, body))
+    };
+
+    match write_result {
+        Ok(_) => ActionResult {
+            success: true,
+            message: format!("日志已导出到 {}", path.display()),
+        },
+        Err(error) => ActionResult {
+            success: false,
+            message: format!("日志导出失败：{}", error),
+        },
     }
 }
 
@@ -321,6 +457,7 @@ fn format_output(output: &str) -> String {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -331,8 +468,15 @@ fn main() {
             set_process_priority,
             get_port_overview,
             get_toolbox_items,
-            run_toolbox_command
+            run_toolbox_command,
+            get_action_logs,
+            export_action_logs
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    println!("Win-Top 仅支持 Windows 运行。当前环境可用于代码检查。");
 }
