@@ -46,6 +46,10 @@ window.dashboardData = {
       options: ["低", "普通", "高", "实时"]
     }
   },
+  diskOverview: [
+    { name: "C:", mount_point: "C:\\", file_system: "NTFS", total: "512.0 GB", available: "186.4 GB", used_percent: 63.6, removable: false },
+    { name: "D:", mount_point: "D:\\", file_system: "NTFS", total: "1.0 TB", available: "742.3 GB", used_percent: 25.7, removable: false }
+  ],
   portOverview: [
     { port: 3000, protocol: "TCP", process: "Node", pid: 2316 },
     { port: 5432, protocol: "TCP", process: "PostgreSQL", pid: 412 },

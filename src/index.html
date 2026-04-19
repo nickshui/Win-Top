@@ -17,21 +17,21 @@
           </div>
         </div>
         <div class="topbar-actions">
-          <input class="search" placeholder="搜索进程、端口、命令" />
-          <button class="primary">AI 助手</button>
+          <input class="search" id="global-search" placeholder="搜索进程、端口、命令" />
+          <button class="primary" id="topbar-ai">AI 助手</button>
         </div>
       </header>
 
       <div class="content">
         <aside class="sidebar">
-          <nav>
-            <a class="nav-item active">概览</a>
-            <a class="nav-item">资源监控</a>
-            <a class="nav-item">进程管理</a>
-            <a class="nav-item">网络与端口</a>
-            <a class="nav-item">磁盘管理</a>
-            <a class="nav-item">工具箱</a>
-            <a class="nav-item">AI 助手</a>
+          <nav id="sidebar-nav">
+            <a class="nav-item active" data-target="overview">概览</a>
+            <a class="nav-item" data-target="monitor">资源监控</a>
+            <a class="nav-item" data-target="process">进程管理</a>
+            <a class="nav-item" data-target="network">网络与端口</a>
+            <a class="nav-item" data-target="disk">磁盘管理</a>
+            <a class="nav-item" data-target="toolbox">工具箱</a>
+            <a class="nav-item" data-target="ai">AI 助手</a>
           </nav>
           <div class="sidebar-footer">
             <span class="status-dot"></span>
@@ -59,10 +59,10 @@
           </section>
 
           <section class="panel-grid">
-            <article class="panel ai-checkup">
+            <article class="panel ai-checkup" id="panel-overview">
               <header>
                 <h3>AI 体检</h3>
-                <button class="ghost">开始体检</button>
+                <button class="ghost" id="start-checkup">开始体检</button>
               </header>
               <div class="ai-checkup-body">
                 <div class="ai-checkup-score">
@@ -86,10 +86,10 @@
                 </div>
               </div>
             </article>
-            <article class="panel">
+            <article class="panel" id="panel-process">
               <header>
                 <h3>进程资源占用</h3>
-                <button class="ghost">查看全部</button>
+                <button class="ghost" data-scroll="panel-process" data-view-all="process">查看全部</button>
               </header>
               <div class="process-meta">总进程数：<span id="process-count">--</span></div>
               <ul class="list" id="process-list"></ul>
@@ -97,7 +97,7 @@
             <article class="panel">
               <header>
                 <h3>进程详情</h3>
-                <button class="ghost">查看全部</button>
+                <button class="ghost" data-scroll="panel-process" data-view-all="process">查看全部</button>
               </header>
               <div class="process-detail" id="process-detail">
                 <div class="detail-row">
@@ -127,7 +127,7 @@
                 <div class="detail-status" id="process-status">等待操作…</div>
               </div>
             </article>
-            <article class="panel">
+            <article class="panel" id="panel-monitor">
               <header>
                 <h3>资源监控概览</h3>
                 <div class="monitor-range">
@@ -141,19 +141,41 @@
               <div class="monitor-history" id="monitor-history">趋势：等待数据…</div>
             </article>
 
-            <article class="panel">
+            <article class="panel" id="panel-network">
               <header>
                 <h3>端口与连接</h3>
-                <button class="ghost">查看详情</button>
+                <button class="ghost" id="refresh-ports">刷新</button>
               </header>
-              <div class="port-meta">活跃端口：<span id="port-count">--</span></div>
+              <div class="port-toolbar">
+                <input class="port-search" id="port-search" placeholder="搜索端口 / 进程 / PID" />
+                <div class="port-chips">
+                  <button class="chip active" data-port-filter="all">全部</button>
+                  <button class="chip" data-port-filter="user">用户进程</button>
+                  <button class="chip" data-port-filter="system">系统进程</button>
+                  <button class="chip" data-port-filter="common">常用端口</button>
+                </div>
+                <label class="port-toggle">
+                  <input type="checkbox" id="port-group-toggle" />
+                  <span>按进程合并</span>
+                </label>
+              </div>
+              <div class="port-meta">显示：<span id="port-count">--</span></div>
               <div class="port-list" id="port-list"></div>
             </article>
 
-            <article class="panel">
+            <article class="panel" id="panel-disk">
+              <header>
+                <h3>磁盘管理</h3>
+                <button class="ghost" id="refresh-disks">刷新</button>
+              </header>
+              <div class="disk-meta">已检测分区：<span id="disk-count">--</span></div>
+              <div class="disk-list" id="disk-list"></div>
+            </article>
+
+            <article class="panel" id="panel-toolbox">
               <header>
                 <h3>工具箱</h3>
-                <button class="ghost">管理脚本</button>
+                <button class="ghost" id="manage-scripts">管理脚本</button>
               </header>
               <div class="tool-meta">可用命令：<span id="tool-count">--</span></div>
               <div class="tool-grid" id="tool-grid"></div>
@@ -174,12 +196,12 @@
           <div class="assistant-card">
             <h4>AI 今日建议</h4>
             <p>检测到内存占用偏高，建议关闭长时间占用的浏览器标签页。</p>
-            <button class="primary">生成优化脚本</button>
+            <button class="primary" id="generate-optimize-script">生成优化脚本</button>
           </div>
           <div class="assistant-card">
             <h4>运行命令卡片</h4>
             <p>快速执行常用的 Windows 命令，并查看解释与风险提示。</p>
-            <button class="ghost">打开工具箱</button>
+            <button class="ghost" id="open-toolbox">打开工具箱</button>
           </div>
           <div class="assistant-card ai-cli" id="ai-cli-panel">
             <h4>AI CLI 会话</h4>

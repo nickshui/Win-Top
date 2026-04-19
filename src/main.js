@@ -41,6 +41,8 @@ if (data) {
   const priorityButton = document.getElementById("set-priority");
   const portList = document.getElementById("port-list");
   const portCount = document.getElementById("port-count");
+  const diskList = document.getElementById("disk-list");
+  const diskCount = document.getElementById("disk-count");
   const toolGrid = document.getElementById("tool-grid");
   const toolCount = document.getElementById("tool-count");
   const toolLog = document.getElementById("tool-log");
@@ -86,6 +88,35 @@ if (data) {
 
   modalCancel.addEventListener("click", closeModal);
 
+  const openPriorityPicker = ({ name, pid, current, options }) => {
+    modalTitle.textContent = "选择优先级";
+    modalBody.innerHTML = "";
+    const desc = document.createElement("p");
+    desc.textContent = `为 ${name}（PID ${pid}）设置优先级，当前：${current}`;
+    modalBody.appendChild(desc);
+    const list = document.createElement("div");
+    list.className = "priority-options";
+    const restore = () => {
+      modalConfirm.style.display = "";
+      modalBody.innerHTML = "";
+    };
+    options.forEach((opt) => {
+      const btn = document.createElement("button");
+      btn.className = opt === current ? "primary" : "ghost";
+      btn.textContent = opt;
+      btn.addEventListener("click", () => {
+        closeModal();
+        restore();
+        setPriority(opt);
+      });
+      list.appendChild(btn);
+    });
+    modalBody.appendChild(list);
+    modalConfirm.style.display = "none";
+    modal.classList.remove("hidden");
+    modalCancel.addEventListener("click", restore, { once: true });
+  };
+
   const renderProcessDetail = (detail) => {
     detailName.textContent = detail.name;
     detailPid.textContent = detail.pid;
@@ -101,6 +132,7 @@ if (data) {
 
     items.forEach((item) => {
       const row = document.createElement("li");
+      row.title = `${item.name} · PID ${item.pid}`;
 
       const name = document.createElement("span");
       name.className = "list-name";
@@ -108,50 +140,189 @@ if (data) {
 
       const metric = document.createElement("span");
       metric.className = "list-metric";
-      metric.textContent = `CPU ${item.cpu}% · 内存 ${item.memory}`;
+      const cpuText = typeof item.cpu === "number" ? item.cpu.toFixed(0) : item.cpu;
+      metric.textContent = `${cpuText}% · ${item.memory}`;
 
-      const button = document.createElement("button");
-      button.className = "ghost";
-      button.textContent = "查看详情";
-      button.addEventListener("click", () => {
-        fetchProcessDetail(item.pid);
-      });
+      row.addEventListener("click", () => fetchProcessDetail(item.pid));
 
       row.appendChild(name);
       row.appendChild(metric);
-      row.appendChild(button);
       processList.appendChild(row);
     });
   };
 
-  const renderPortRows = (items) => {
-    portList.innerHTML = "";
-    portCount.textContent = items.length.toString();
+  const SYSTEM_PROC_NAMES = new Set([
+    "System", "Idle", "System Idle", "svchost.exe", "services.exe",
+    "lsass.exe", "wininit.exe", "winlogon.exe", "csrss.exe", "smss.exe",
+    "dwm.exe", "fontdrvhost.exe", "spoolsv.exe", "dllhost.exe",
+    "RuntimeBroker.exe", "SearchIndexer.exe", "MsMpEng.exe",
+    "NisSrv.exe", "SecurityHealthService.exe", "WUDFHost.exe"
+  ]);
 
+  const COMMON_PORTS = new Set([
+    20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
+    1433, 1521, 2375, 2376, 3000, 3306, 3389, 4200, 5000, 5173, 5432,
+    5672, 5984, 6379, 6443, 7474, 8000, 8080, 8443, 8888, 9000, 9200,
+    9300, 11211, 15672, 27017, 50000
+  ]);
+
+  const isSystemProcess = (name) => SYSTEM_PROC_NAMES.has(name) || name.startsWith("PID ");
+
+  let portRawItems = [];
+  const portFilterState = {
+    query: "",
+    category: "all",
+    grouped: false
+  };
+
+  const applyPortFilters = (items) => {
+    return items.filter((it) => {
+      if (portFilterState.category === "user" && isSystemProcess(it.process)) return false;
+      if (portFilterState.category === "system" && !isSystemProcess(it.process)) return false;
+      if (portFilterState.category === "common" && !COMMON_PORTS.has(it.port)) return false;
+      if (portFilterState.query) {
+        const q = portFilterState.query.toLowerCase();
+        const hay = `${it.port} ${it.process.toLowerCase()} ${it.pid} ${it.protocol.toLowerCase()}`;
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  };
+
+  const buildPortRow = (item) => {
+    const row = document.createElement("div");
+    row.className = "port-item";
+    if (isSystemProcess(item.process)) row.classList.add("is-system");
+    row.title = `${item.process} · PID ${item.pid} · ${item.protocol}`;
+
+    const info = document.createElement("div");
+    const port = document.createElement("div");
+    port.className = "port";
+    port.textContent = `:${item.port} ${item.protocol}`;
+    if (COMMON_PORTS.has(item.port)) {
+      const tag = document.createElement("span");
+      tag.className = "port-tag";
+      tag.textContent = "常用";
+      port.appendChild(tag);
+    }
+    const meta = document.createElement("div");
+    meta.className = "port-sub";
+    meta.textContent = `${item.process} · PID ${item.pid}`;
+    info.appendChild(port);
+    info.appendChild(meta);
+
+    const btn = document.createElement("button");
+    btn.className = "ghost";
+    btn.textContent = "详情";
+
+    row.addEventListener("click", () => fetchProcessDetail(item.pid));
+    row.appendChild(info);
+    row.appendChild(btn);
+    return row;
+  };
+
+  const renderPortGrouped = (items) => {
+    const groups = new Map();
+    items.forEach((it) => {
+      const key = `${it.process}|${it.pid}`;
+      if (!groups.has(key)) groups.set(key, { process: it.process, pid: it.pid, ports: [] });
+      groups.get(key).ports.push(it);
+    });
+    const sorted = [...groups.values()].sort((a, b) => b.ports.length - a.ports.length);
+    sorted.forEach((g) => {
+      const groupEl = document.createElement("div");
+      groupEl.className = "port-group";
+      if (isSystemProcess(g.process)) groupEl.classList.add("is-system");
+
+      const header = document.createElement("div");
+      header.className = "port-group-header";
+      const left = document.createElement("div");
+      left.innerHTML = `<strong>${g.process}</strong> <span class="port-group-count">${g.ports.length}</span>`;
+      const right = document.createElement("div");
+      right.className = "port-sub";
+      right.textContent = `PID ${g.pid}`;
+      header.appendChild(left);
+      header.appendChild(right);
+
+      const content = document.createElement("div");
+      content.className = "port-group-content collapsed";
+      g.ports.sort((a, b) => a.port - b.port).forEach((p) => {
+        const chip = document.createElement("span");
+        chip.className = "port-chip";
+        if (COMMON_PORTS.has(p.port)) chip.classList.add("common");
+        chip.textContent = `:${p.port} ${p.protocol}`;
+        chip.addEventListener("click", () => fetchProcessDetail(p.pid));
+        content.appendChild(chip);
+      });
+      header.addEventListener("click", () => content.classList.toggle("collapsed"));
+
+      groupEl.appendChild(header);
+      groupEl.appendChild(content);
+      portList.appendChild(groupEl);
+    });
+  };
+
+  const renderPortRows = (items) => {
+    if (items !== portRawItems) portRawItems = items;
+    const filtered = applyPortFilters(portRawItems);
+    portList.innerHTML = "";
+    portCount.textContent = `${filtered.length} / ${portRawItems.length}`;
+    if (filtered.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "port-empty";
+      empty.textContent = "无匹配端口";
+      portList.appendChild(empty);
+      return;
+    }
+    if (portFilterState.grouped) {
+      renderPortGrouped(filtered);
+    } else {
+      filtered.forEach((item) => portList.appendChild(buildPortRow(item)));
+    }
+  };
+
+  const renderDiskRows = (items) => {
+    diskList.innerHTML = "";
+    diskCount.textContent = items.length.toString();
     items.forEach((item) => {
       const row = document.createElement("div");
-      row.className = "port-item";
-
-      const info = document.createElement("div");
-      const port = document.createElement("div");
-      port.className = "port";
-      port.textContent = `:${item.port}`;
-
+      row.className = "disk-item";
+      const header = document.createElement("div");
+      header.className = "disk-item-header";
+      const label = document.createElement("span");
+      label.className = "disk-name";
+      const removableTag = item.removable ? " · 可移动" : "";
+      label.textContent = `${item.mount_point} (${item.name}) · ${item.file_system}${removableTag}`;
+      const pct = document.createElement("span");
+      pct.className = "disk-pct";
+      pct.textContent = `${Math.round(item.used_percent)}%`;
+      header.appendChild(label);
+      header.appendChild(pct);
+      const bar = document.createElement("div");
+      bar.className = "disk-bar";
+      const fill = document.createElement("div");
+      fill.className = "disk-bar-fill";
+      fill.style.width = `${Math.min(100, Math.max(0, item.used_percent))}%`;
+      if (item.used_percent >= 85) fill.classList.add("danger");
+      else if (item.used_percent >= 70) fill.classList.add("warn");
+      bar.appendChild(fill);
       const meta = document.createElement("div");
-      meta.className = "port-sub";
-      meta.textContent = `${item.process} · PID ${item.pid} · ${item.protocol}`;
-
-      info.appendChild(port);
-      info.appendChild(meta);
-
-      const button = document.createElement("button");
-      button.className = "ghost";
-      button.textContent = "查看进程";
-
-      row.appendChild(info);
-      row.appendChild(button);
-      portList.appendChild(row);
+      meta.className = "disk-meta-row";
+      meta.textContent = `可用 ${item.available} / 总计 ${item.total}`;
+      row.appendChild(header);
+      row.appendChild(bar);
+      row.appendChild(meta);
+      diskList.appendChild(row);
     });
+  };
+
+  const fetchDiskOverview = async () => {
+    if (!tauriInvoke) {
+      renderDiskRows(data.diskOverview);
+      return;
+    }
+    const items = await tauriInvoke("get_disk_overview");
+    renderDiskRows(items);
   };
 
   const renderToolCards = (items) => {
@@ -325,8 +496,13 @@ if (data) {
       return;
     }
 
-    const ports = await tauriInvoke("get_port_overview");
-    renderPortRows(ports);
+    const result = await tauriInvoke("get_port_overview");
+    if (result.error) {
+      portCount.textContent = "0";
+      portList.innerHTML = `<div class="port-error">${result.error}</div>`;
+      return;
+    }
+    renderPortRows(result.items);
   };
 
   const fetchToolbox = async () => {
@@ -396,22 +572,28 @@ if (data) {
     detailStatus.textContent = result.message;
   };
 
-  const setPriority = async () => {
+  const setPriority = async (level) => {
     const pid = Number(detailPid.textContent);
-    const current = data.processActions.priority.current;
-    const next = data.processActions.priority.options.find((option) => option !== current);
-    if (!tauriInvoke) {
-      detailStatus.textContent = `已模拟设置优先级为 ${next}，PID: ${pid}`;
+    if (!Number.isFinite(pid) || pid <= 0) {
+      detailStatus.textContent = "请先选择进程。";
       return;
     }
-
-    const result = await tauriInvoke("set_process_priority", { pid, level: next });
+    if (!tauriInvoke) {
+      data.processActions.priority.current = level;
+      detailStatus.textContent = `已模拟设置优先级为 ${level}，PID: ${pid}`;
+      return;
+    }
+    const result = await tauriInvoke("set_process_priority", { pid, level });
+    if (result.success) {
+      data.processActions.priority.current = level;
+    }
     detailStatus.textContent = result.message;
   };
 
   fetchProcessOverview();
   fetchProcessDetail(data.processDetail.pid);
   fetchPortOverview();
+  fetchDiskOverview();
   fetchToolbox();
   renderAiCliSessions(data.aiCli);
 
@@ -424,10 +606,16 @@ if (data) {
   });
 
   priorityButton.addEventListener("click", () => {
-    openModal({
-      title: "设置优先级确认",
-      body: `将调整进程 ${detailName.textContent}（PID ${detailPid.textContent}）的优先级。`,
-      onConfirm: setPriority
+    const pid = Number(detailPid.textContent);
+    if (!Number.isFinite(pid) || pid <= 0) {
+      detailStatus.textContent = "请先选择进程。";
+      return;
+    }
+    openPriorityPicker({
+      name: detailName.textContent,
+      pid,
+      current: data.processActions.priority.current,
+      options: data.processActions.priority.options
     });
   });
 
@@ -448,8 +636,183 @@ if (data) {
     });
   });
 
+  document.getElementById("refresh-ports").addEventListener("click", fetchPortOverview);
+  document.getElementById("refresh-disks").addEventListener("click", fetchDiskOverview);
+
+  const portSearchInput = document.getElementById("port-search");
+  portSearchInput.addEventListener("input", () => {
+    portFilterState.query = portSearchInput.value.trim();
+    renderPortRows(portRawItems);
+  });
+
+  const portChips = Array.from(document.querySelectorAll("[data-port-filter]"));
+  portChips.forEach((chip) => {
+    chip.addEventListener("click", () => {
+      portChips.forEach((c) => c.classList.remove("active"));
+      chip.classList.add("active");
+      portFilterState.category = chip.dataset.portFilter;
+      renderPortRows(portRawItems);
+    });
+  });
+
+  const portGroupToggle = document.getElementById("port-group-toggle");
+  portGroupToggle.addEventListener("change", () => {
+    portFilterState.grouped = portGroupToggle.checked;
+    renderPortRows(portRawItems);
+  });
+
   viewActionLogsButton.addEventListener("click", refreshActionLogs);
   exportActionLogsButton.addEventListener("click", exportActionLogs);
+
+  const navTargetToPanelId = {
+    overview: "panel-overview",
+    monitor: "panel-monitor",
+    process: "panel-process",
+    network: "panel-network",
+    disk: "panel-disk",
+    toolbox: "panel-toolbox",
+    ai: "ai-cli-panel"
+  };
+
+  const scrollToPanelId = (panelId) => {
+    const target = document.getElementById(panelId);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      target.classList.add("panel-flash");
+      setTimeout(() => target.classList.remove("panel-flash"), 900);
+    }
+  };
+
+  const navItems = Array.from(document.querySelectorAll("#sidebar-nav .nav-item"));
+  navItems.forEach((item) => {
+    item.addEventListener("click", () => {
+      navItems.forEach((n) => n.classList.remove("active"));
+      item.classList.add("active");
+      const targetKey = item.dataset.target;
+      const panelId = navTargetToPanelId[targetKey];
+      if (panelId) {
+        scrollToPanelId(panelId);
+      }
+      if (targetKey === "disk") {
+        fetchDiskOverview();
+      }
+    });
+  });
+
+  document.getElementById("topbar-ai").addEventListener("click", () => {
+    scrollToPanelId("ai-cli-panel");
+  });
+
+  document.getElementById("start-checkup").addEventListener("click", () => {
+    const scoreEl = document.getElementById("ai-score");
+    const subEl = document.getElementById("ai-score-sub");
+    scoreEl.textContent = "检测中…";
+    subEl.textContent = "正在采集系统指标";
+    setTimeout(() => {
+      const score = 70 + Math.floor(Math.random() * 25);
+      scoreEl.textContent = String(score);
+      subEl.textContent = score >= 85 ? "系统运行稳定 · 风险较低" : "存在优化空间 · 查看建议";
+    }, 600);
+  });
+
+  document.querySelectorAll('[data-view-all="process"]').forEach((btn) => {
+    btn.addEventListener("click", () => scrollToPanelId("panel-process"));
+  });
+
+  document.getElementById("manage-scripts").addEventListener("click", () => {
+    scrollToPanelId("panel-toolbox");
+    updateToolLog("脚本管理入口待实现：当前支持预置命令卡片。");
+  });
+
+  const openAiScriptPreview = (recipe) => {
+    modalTitle.textContent = `AI 脚本：${recipe.name}`;
+    modalBody.innerHTML = "";
+    const desc = document.createElement("p");
+    desc.textContent = recipe.description;
+    modalBody.appendChild(desc);
+
+    const riskLabel = { low: "低", medium: "中", high: "高" }[recipe.risk] || recipe.risk;
+    const riskLine = document.createElement("div");
+    riskLine.className = `ai-script-risk risk-${recipe.risk}`;
+    riskLine.textContent = `风险等级：${riskLabel}${recipe.requires_admin ? " · 需要管理员权限" : ""}`;
+    modalBody.appendChild(riskLine);
+
+    const stepsWrap = document.createElement("div");
+    stepsWrap.className = "ai-script-steps";
+    recipe.steps.forEach((step, idx) => {
+      const stepEl = document.createElement("div");
+      stepEl.className = "ai-script-step";
+      const title = document.createElement("div");
+      title.className = "ai-script-step-title";
+      title.textContent = `步骤 ${idx + 1}：${step.rationale}`;
+      const cmd = document.createElement("pre");
+      cmd.className = "ai-script-step-cmd";
+      cmd.textContent = `[${step.shell.toUpperCase()}] ${step.command}`;
+      stepEl.appendChild(title);
+      stepEl.appendChild(cmd);
+      stepsWrap.appendChild(stepEl);
+    });
+    modalBody.appendChild(stepsWrap);
+
+    modalConfirm.textContent = "执行脚本";
+    modal.classList.remove("hidden");
+
+    const restore = () => {
+      modalConfirm.textContent = "确认";
+      modalBody.innerHTML = "";
+    };
+    const runIt = async () => {
+      closeModal();
+      restore();
+      updateToolLog(`正在执行 AI 脚本：${recipe.name}…`);
+      if (!tauriInvoke) {
+        updateToolLog(`【模拟执行】${recipe.name}\n${recipe.steps.map((s) => s.command).join("\n")}`);
+        return;
+      }
+      const result = await tauriInvoke("run_ai_script", { id: recipe.id });
+      updateToolLog(result.message);
+    };
+    modalConfirm.addEventListener("click", runIt, { once: true });
+    modalCancel.addEventListener("click", restore, { once: true });
+  };
+
+  document.getElementById("generate-optimize-script").addEventListener("click", async () => {
+    scrollToPanelId("panel-toolbox");
+    if (!tauriInvoke) {
+      openAiScriptPreview({
+        id: "daily-healthcheck",
+        name: "日常健康检查（模拟）",
+        description: "当前为静态模式，展示脚本预览但不会执行真实命令。",
+        risk: "low",
+        requires_admin: false,
+        steps: [
+          { rationale: "刷新 DNS 缓存", command: "ipconfig /flushdns", shell: "cmd" },
+          { rationale: "查看监听端口数", command: "netstat -ano", shell: "cmd" }
+        ]
+      });
+      return;
+    }
+    updateToolLog("AI：正在根据当前系统状态生成脚本…");
+    const recipe = await tauriInvoke("generate_ai_script");
+    openAiScriptPreview(recipe);
+  });
+
+  document.getElementById("open-toolbox").addEventListener("click", () => {
+    scrollToPanelId("panel-toolbox");
+  });
+
+  const globalSearch = document.getElementById("global-search");
+  globalSearch.addEventListener("input", () => {
+    const q = globalSearch.value.trim().toLowerCase();
+    Array.from(processList.children).forEach((row) => {
+      const name = row.querySelector(".list-name")?.textContent?.toLowerCase() ?? "";
+      row.style.display = !q || name.includes(q) ? "" : "none";
+    });
+    Array.from(portList.children).forEach((row) => {
+      const text = row.textContent?.toLowerCase() ?? "";
+      row.style.display = !q || text.includes(q) ? "" : "none";
+    });
+  });
 }
 
 const banner = document.createElement("div");

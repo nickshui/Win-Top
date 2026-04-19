@@ -3,7 +3,8 @@
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
     "devPath": "../src",
-    "distDir": "../src"
+    "distDir": "../src",
+    "withGlobalTauri": true
   },
   "package": {
     "productName": "Win-Top",
@@ -17,7 +18,7 @@
       "active": true,
       "targets": "all",
       "identifier": "com.wintop.app",
-      "icon": []
+      "icon": ["icons/icon.ico", "icons/icon.png"]
     },
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
