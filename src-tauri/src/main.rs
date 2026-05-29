@@ -49,6 +49,24 @@ fn get_disk_report() -> disk::DiskReport {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+fn network_checkup() -> network::NetCheckup {
+    network::checkup()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn probe_target(input: String) -> network::TargetProbe {
+    network::probe_target(&input)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn speed_test() -> network::SpeedResult {
+    network::speed_test()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 fn is_elevated() -> bool {
     privilege::is_elevated()
 }
@@ -84,6 +102,9 @@ fn main() {
             set_process_priority,
             get_connections,
             get_disk_report,
+            network_checkup,
+            probe_target,
+            speed_test,
             is_elevated,
             relaunch_as_admin,
             get_etw_status

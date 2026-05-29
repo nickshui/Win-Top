@@ -1,6 +1,4 @@
 <script>
-  import { flip } from "svelte/animate";
-  import { fly } from "svelte/transition";
   import { procEvents, etwAvailable, etwReason, elevated, relaunchAdmin } from "../stores.js";
 
   let filter = "all"; // all | start | stop
@@ -68,7 +66,7 @@
     </div>
   {:else}
     {#each shown as e (e._id)}
-      <div class="row" in:fly={{ y: -10, duration: 180 }} animate:flip={{ duration: 180 }}>
+      <div class="row">
         <span class="ts">{e.ts}</span>
         <span class="badge {e.action}">{e.action === "start" ? "启动" : "结束"}</span>
         <span class="image" title={e.image}>{e.image}</span>

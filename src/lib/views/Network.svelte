@@ -6,6 +6,55 @@
 
   let rows = [];
   let killTarget = null; // 选中要结束的端口行
+
+  // 网络体检
+  let checkup = null;
+  let checkupLoading = false;
+  let checkupOpen = true; // 结果折叠/展开
+  async function runCheckup() {
+    checkupLoading = true;
+    try {
+      checkup = await invoke("network_checkup");
+      checkupOpen = true;
+    } catch (e) {
+      pushToast("网络体检失败：" + e, "error");
+    } finally {
+      checkupLoading = false;
+    }
+  }
+  const latColor = (ms) => (ms == null ? "" : ms < 30 ? "ok" : ms < 100 ? "warn" : "danger");
+
+  // 自定义检测（域名/IP[:端口]）
+  let customInput = "";
+  let customResult = null;
+  let customLoading = false;
+  async function runCustom() {
+    if (!customInput.trim()) return;
+    customLoading = true;
+    try {
+      customResult = await invoke("probe_target", { input: customInput.trim() });
+    } catch (e) {
+      pushToast("检测失败：" + e, "error");
+    } finally {
+      customLoading = false;
+    }
+  }
+
+  // 下行测速
+  let speed = null;
+  let speedLoading = false;
+  async function runSpeed() {
+    speedLoading = true;
+    try {
+      speed = await invoke("speed_test");
+      if (speed?.error) pushToast("测速失败：" + speed.error, "error");
+    } catch (e) {
+      pushToast("测速失败：" + e, "error");
+    } finally {
+      speedLoading = false;
+    }
+  }
+  const speedColor = (m) => (m >= 50 ? "ok" : m >= 10 ? "warn" : "danger");
   let loading = true;
   let q = "";
   let proto = "all"; // all | TCP | UDP
@@ -72,6 +121,127 @@
     refresh();
   }
 </script>
+
+<section class="nettools">
+  <header class="nt-head">
+    <h2 class="section-title">网络工具</h2>
+    <button
+      class="nt-collapse"
+      on:click={() => (checkupOpen = !checkupOpen)}
+      aria-expanded={checkupOpen}
+    >
+      {checkupOpen ? "收起" : "展开"}
+      <span class="chev" class:open={checkupOpen}>▾</span>
+    </button>
+  </header>
+
+  {#if checkupOpen}
+    <!-- 动作栏：体检 / 测速 / 自定义检测 -->
+    <div class="nt-actions">
+      <button class="primary" on:click={runCheckup} disabled={checkupLoading}>
+        {checkupLoading ? "体检中…" : "一键体检"}
+      </button>
+      <button class="primary alt" on:click={runSpeed} disabled={speedLoading}>
+        {speedLoading ? "测速中…" : "下行测速"}
+      </button>
+      <div class="nt-custom">
+        <input
+          class="search"
+          bind:value={customInput}
+          on:keydown={(e) => e.key === "Enter" && runCustom()}
+          placeholder="域名 / IP[:端口]，如 github.com:443"
+          aria-label="自定义检测目标"
+        />
+        <button class="ghost" on:click={runCustom} disabled={customLoading}>
+          {customLoading ? "检测中…" : "检测"}
+        </button>
+      </div>
+    </div>
+
+    {#if customResult}
+      <div class="custom-result">
+        {#if customResult.error}
+          <span class="cr-err">{customResult.error}</span>
+        {:else}
+          <span class="cr-item">解析 <b class="mono">{customResult.resolved.join(", ")}</b></span>
+          {#if customResult.ping}
+            <span class="cr-item">延迟
+              {#if customResult.ping.ok}
+                <b class="lat {latColor(customResult.ping.latency_ms)}">{customResult.ping.latency_ms} ms</b>
+              {:else}<b class="lat danger">超时</b>{/if}
+            </span>
+          {/if}
+          {#if customResult.tcp}
+            <span class="cr-item">端口 {customResult.tcp.port}
+              {#if customResult.tcp.ok}
+                <b class="lat ok">通 · {customResult.tcp.latency_ms} ms</b>
+              {:else}<b class="lat danger">不通</b>{/if}
+            </span>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+
+    {#if speed && !speed.error}
+      <div class="speed-bar">
+        <span class="ck-label">下行带宽</span>
+        <span class="speed-val {speedColor(speed.down_mbps)}">
+          {speed.down_mbps.toFixed(1)}<small> Mbps</small>
+        </span>
+        <span class="speed-meta mono">{(speed.bytes / 1e6).toFixed(1)} MB · {speed.secs.toFixed(1)}s</span>
+      </div>
+    {/if}
+
+  {#if checkup}
+    <div class="checkup-grid">
+      <!-- 延迟 -->
+      <div class="ck-card">
+        <div class="ck-label">延迟 (ICMP)</div>
+        <div class="ping-list">
+          {#each checkup.pings as p}
+            <div class="ping-row">
+              <span class="ping-name">{p.label}<span class="ping-tgt">{p.target}</span></span>
+              {#if p.ok}
+                <span class="lat {latColor(p.latency_ms)}">{p.latency_ms} ms</span>
+              {:else}
+                <span class="lat danger" title={p.error}>—</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+
+      <!-- IP / DNS -->
+      <div class="ck-card">
+        <div class="ck-label">公网 IP</div>
+        <div class="ck-value mono">{checkup.public_ip ?? "获取失败"}</div>
+        <div class="ck-label" style="margin-top:12px">DNS 解析</div>
+        <div class="ck-value mono">{checkup.dns_ms != null ? `${checkup.dns_ms} ms` : "失败"}</div>
+      </div>
+
+      <!-- 网卡 -->
+      <div class="ck-card wide">
+        <div class="ck-label">本机网卡</div>
+        <div class="adapters">
+          {#each checkup.adapters as a}
+            <div class="adapter">
+              <span class="ad-name">{a.name}</span>
+              <span class="ad-ips mono">{a.ips.join(", ")}</span>
+              {#if a.gateway}<span class="ad-gw mono">网关 {a.gateway}</span>{/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    </div>
+  {:else if !checkupLoading}
+    <p class="ck-hint">
+      「一键体检」：本机 IP / 网关 / 公网 IP / 延迟（国内+海外）/ DNS 解析 ·
+      「下行测速」：带宽 Mbps ·
+      右侧输入框可检测任意 域名/IP/端口。
+    </p>
+  {/if}
+  {/if}
+</section>
 
 <div class="toolbar">
   <input
@@ -420,5 +590,244 @@
     display: flex;
     justify-content: flex-end;
     gap: var(--sp-2);
+  }
+
+  /* 网络工具 */
+  .nettools {
+    margin-bottom: var(--sp-6);
+    padding: var(--sp-4) var(--sp-6);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .nt-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .section-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .nt-collapse {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(99, 102, 241, 0.12);
+    border: 1px solid rgba(99, 102, 241, 0.45);
+    color: #c7d2fe;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 14px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .nt-collapse:hover {
+    background: rgba(99, 102, 241, 0.2);
+    border-color: var(--accent);
+  }
+  .nt-collapse .chev {
+    color: #c7d2fe;
+  }
+  .nt-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
+    margin-top: var(--sp-4);
+  }
+  .nt-custom {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-left: auto;
+  }
+  .nt-custom .search {
+    flex: 0 0 300px;
+  }
+  .nt-custom .ghost {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .nt-custom .ghost:hover {
+    background: var(--surface-2);
+  }
+  .primary {
+    border: none;
+    background: linear-gradient(135deg, var(--accent), #7c3aed);
+    color: #fff;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .primary.alt {
+    background: linear-gradient(135deg, #0ea5e9, var(--accent));
+  }
+  .primary:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .speed-bar {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-3);
+    margin-top: var(--sp-4);
+    padding: var(--sp-3) var(--sp-4);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .speed-val {
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .speed-val small {
+    font-size: 13px;
+    font-weight: 400;
+  }
+  .speed-val.ok {
+    color: var(--ok);
+  }
+  .speed-val.warn {
+    color: var(--warn);
+  }
+  .speed-val.danger {
+    color: var(--danger);
+  }
+  .speed-meta {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .ck-hint {
+    margin: var(--sp-3) 0 0;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .checkup-grid {
+    margin-top: var(--sp-4);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--sp-3);
+  }
+  .ck-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--sp-3) var(--sp-4);
+  }
+  .ck-card.wide {
+    grid-column: 1 / -1;
+  }
+  .ck-label {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .ck-value {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 4px;
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .ping-list {
+    margin-top: var(--sp-2);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ping-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 13px;
+  }
+  .ping-name {
+    color: var(--text);
+  }
+  .ping-tgt {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    margin-left: 8px;
+  }
+  .lat {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .lat.ok {
+    color: var(--ok);
+  }
+  .lat.warn {
+    color: var(--warn);
+  }
+  .lat.danger {
+    color: var(--danger);
+  }
+  .adapters {
+    margin-top: var(--sp-2);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .adapter {
+    display: flex;
+    gap: var(--sp-3);
+    align-items: baseline;
+    flex-wrap: wrap;
+    font-size: 13px;
+  }
+  .ad-name {
+    font-weight: 500;
+    min-width: 140px;
+  }
+  .ad-ips {
+    color: #93c5fd;
+  }
+  .ad-gw {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
+  .chev {
+    font-size: 11px;
+    transition: transform 0.15s ease;
+    transform: rotate(-90deg);
+  }
+  .chev.open {
+    transform: rotate(0deg);
+  }
+  .custom-result {
+    margin-top: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    display: flex;
+    gap: var(--sp-4);
+    align-items: baseline;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .cr-item b {
+    color: var(--text);
+    margin-left: 4px;
+  }
+  .cr-err {
+    color: var(--danger);
   }
 </style>

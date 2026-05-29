@@ -61,11 +61,28 @@ function refreshEtwStatus() {
 
 export function startEvents() {
   let un1, un2;
+  // 批量节流：高频事件（每秒上百条）先入缓冲，每 250ms 合并刷新一次，
+  // 避免逐条 re-render 造成的抖动/残影，同时大幅降低开销。
+  let pending = [];
+  let flushTimer = null;
+  const flush = () => {
+    flushTimer = null;
+    if (!pending.length) return;
+    const batch = pending;
+    pending = [];
+    procEvents.update((list) => {
+      const newestFirst = [];
+      for (let i = batch.length - 1; i >= 0; i--) newestFirst.push(batch[i]);
+      return [...newestFirst, ...list].slice(0, MAX_EVENTS);
+    });
+  };
+
   invoke("is_elevated")
     .then((v) => elevated.set(!!v))
     .catch(() => {});
   listen("proc-event", (e) => {
-    procEvents.update((l) => [{ ...e.payload, _id: ++eventSeq }, ...l].slice(0, MAX_EVENTS));
+    pending.push({ ...e.payload, _id: ++eventSeq });
+    if (!flushTimer) flushTimer = setTimeout(flush, 250);
   }).then((u) => (un1 = u));
   listen("etw-status", (e) => {
     etwAvailable.set(!!e.payload.available);
@@ -77,6 +94,7 @@ export function startEvents() {
   return () => {
     if (un1) un1();
     if (un2) un2();
+    if (flushTimer) clearTimeout(flushTimer);
   };
 }
 
