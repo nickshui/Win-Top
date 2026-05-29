@@ -7,10 +7,24 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-sysinfo = "0.30"
 
 [target.'cfg(windows)'.dependencies]
 tauri = { version = "1.5", features = ["api-all"] }
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Performance",
+  "Win32_System_SystemInformation",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Win32_Storage_FileSystem",
+  "Win32_Security",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+  "Wdk_System_SystemInformation",
+] }
+netstat2 = "0.9"
+wmi = "0.14"
+ferrisetw = "1"
 
 [target.'cfg(windows)'.build-dependencies]
 tauri-build = { version = "1.5", features = [] }

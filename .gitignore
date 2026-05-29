@@ -1,5 +1,10 @@
 # Rust / Cargo
 src-tauri/target/
+poc-native/target/
+
+# Node / Vite
+node_modules/
+dist/
 
 # Tauri
 src-tauri/WixToolset/

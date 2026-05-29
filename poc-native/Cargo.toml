@@ -1,0 +1,32 @@
+[package]
+name = "poc-native"
+version = "0.1.0"
+edition = "2021"
+
+# 原生 Windows API 能力验证 POC（不依赖 sysinfo / 不 spawn shell）
+# 验证目标：
+#   1. PDH 准确 CPU（英文计数器，规避中文系统本地化问题）
+#   2. GlobalMemoryStatusEx 内存
+#   3. netstat2 (GetExtendedTcpTable) 端口 -> PID
+#   4. Toolhelp32 进程枚举
+#   5. (Stage2) ferrisetw ETW 实时进程事件
+
+[dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_System_Performance",
+  "Win32_System_SystemInformation",
+  "Win32_System_Diagnostics_ToolHelp",
+] }
+netstat2 = "0.9"
+ferrisetw = "1"
+wmi = "0.14"
+serde = { version = "1", features = ["derive"] }
+
+[[bin]]
+name = "poc-native"
+path = "src/main.rs"
+
+[[bin]]
+name = "disktemp"
+path = "src/bin/disktemp.rs"
