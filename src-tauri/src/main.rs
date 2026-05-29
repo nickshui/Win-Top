@@ -61,8 +61,17 @@ fn probe_target(input: String) -> network::TargetProbe {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn speed_test() -> network::SpeedResult {
-    network::speed_test()
+async fn speed_test() -> network::SpeedResult {
+    // 在阻塞线程池执行，避免占用主线程导致窗口「未响应」
+    tauri::async_runtime::spawn_blocking(network::speed_test)
+        .await
+        .unwrap_or_else(|_| network::SpeedResult {
+            down_mbps: 0.0,
+            bytes: 0,
+            secs: 0.0,
+            streams: 0,
+            error: Some("测速任务异常退出".to_string()),
+        })
 }
 
 #[cfg(target_os = "windows")]

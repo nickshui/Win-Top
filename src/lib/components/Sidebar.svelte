@@ -12,6 +12,7 @@
     { id: "disk", label: "磁盘管理", icon: "harddrive" },
     { id: "toolbox", label: "工具箱", icon: "terminal" },
     { id: "ai", label: "AI 助手", icon: "sparkles" },
+    { id: "about", label: "关于", icon: "info" },
   ];
 </script>
 

@@ -8,6 +8,7 @@
   import Network from "./lib/views/Network.svelte";
   import Disk from "./lib/views/Disk.svelte";
   import Events from "./lib/views/Events.svelte";
+  import About from "./lib/views/About.svelte";
   import Placeholder from "./lib/views/Placeholder.svelte";
   import Toast from "./lib/components/Toast.svelte";
 
@@ -52,6 +53,7 @@
       icon: "sparkles",
       plan: "基于真实系统快照的状态解释与脚本生成，执行前可视化确认与风险提示。",
     },
+    about: { title: "关于", icon: "info" },
   };
 </script>
 
@@ -70,6 +72,8 @@
         <Network />
       {:else if current === "disk"}
         <Disk />
+      {:else if current === "about"}
+        <About />
       {:else}
         <Placeholder
           icon={meta[current].icon}

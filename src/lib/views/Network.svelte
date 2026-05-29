@@ -188,7 +188,10 @@
         <span class="speed-val {speedColor(speed.down_mbps)}">
           {speed.down_mbps.toFixed(1)}<small> Mbps</small>
         </span>
-        <span class="speed-meta mono">{(speed.bytes / 1e6).toFixed(1)} MB · {speed.secs.toFixed(1)}s</span>
+        <span class="speed-meta mono">
+          {(speed.bytes / 1e6).toFixed(1)} MB · {speed.secs.toFixed(1)}s
+          {#if speed.streams}· {speed.streams} 路并发{/if}
+        </span>
       </div>
     {/if}
 

@@ -342,56 +342,13 @@ pub struct SpeedResult {
     pub down_mbps: f64,
     pub bytes: u64,
     pub secs: f64,
+    pub streams: usize,
     pub error: Option<String>,
 }
 
-// 多并发限时下载，返回 (总字节, 秒)。单 TCP 连接受窗口/延迟限制难跑满千兆，
-// 故开多个并发连接同时下载（各自独立拉取同一大文件），聚合吞吐才接近线路带宽。
-fn parallel_download(
-    client: &std::sync::Arc<reqwest::blocking::Client>,
-    url: &str,
-    streams: usize,
-    budget: std::time::Duration,
-) -> (u64, f64) {
-    use std::io::Read;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
-
-    let total = Arc::new(AtomicU64::new(0));
-    let start = Instant::now();
-    let handles: Vec<_> = (0..streams)
-        .map(|_| {
-            let c = Arc::clone(client);
-            let u = url.to_string();
-            let t = Arc::clone(&total);
-            std::thread::spawn(move || {
-                if let Ok(mut resp) = c.get(&u).send() {
-                    if resp.status().is_success() {
-                        let mut buf = [0u8; 65536];
-                        loop {
-                            match resp.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    t.fetch_add(n as u64, Ordering::Relaxed);
-                                    if start.elapsed() >= budget {
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                }
-            })
-        })
-        .collect();
-    for h in handles {
-        let _ = h.join();
-    }
-    (total.load(Ordering::Relaxed), start.elapsed().as_secs_f64())
-}
-
 pub fn speed_test() -> SpeedResult {
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -399,41 +356,93 @@ pub fn speed_test() -> SpeedResult {
         down_mbps: 0.0,
         bytes: 0,
         secs: 0.0,
+        streams: 0,
         error: Some(msg),
     };
 
     let client = match reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(3)) // 失败源 3s 内放弃，不拖累整体
+        .timeout(Duration::from_secs(30))
         .build()
     {
         Ok(c) => Arc::new(c),
         Err(e) => return fail(e.to_string()),
     };
 
-    // 大文件候选（国内优先）：需足够大，使多并发连接跑满整个测速窗口。
-    // 404/不可达会被跳过（status 非 success → 该候选 0 字节 → 试下一个）。
-    let candidates = [
+    // 多个「不同主机」的源各开多个流同时下载，聚合吞吐以逼近线路带宽
+    // （突破单镜像对单客户端的限速）。不可达/404 的源被快速跳过、贡献 0。
+    let sources = [
+        "https://npmmirror.com/mirrors/electron/28.0.0/electron-v28.0.0-win32-x64.zip",
         "https://mirrors.aliyun.com/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso",
+        "https://mirrors.cloud.tencent.com/nodejs-release/v20.11.0/node-v20.11.0-x64.msi",
         "https://mirrors.tuna.tsinghua.edu.cn/anaconda/archive/Anaconda3-2024.02-1-Windows-x86_64.exe",
-        "https://npmmirror.com/mirrors/node/v20.11.0/node-v20.11.0-x64.msi",
         "https://cachefly.cachefly.net/100mb.test",
-        "https://speed.cloudflare.com/__down?bytes=1000000000",
     ];
+    let streams_per_source = 3;
 
-    let streams = 6;
-    let budget = Duration::from_secs(7);
-    for url in candidates {
-        let (bytes, secs) = parallel_download(&client, url, streams, budget);
-        if bytes >= 5_000_000 && secs > 0.0 {
-            return SpeedResult {
-                down_mbps: (bytes as f64 * 8.0) / 1_000_000.0 / secs,
-                bytes,
-                secs,
-                error: None,
-            };
+    let total = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut handles = Vec::new();
+
+    for url in sources {
+        for _ in 0..streams_per_source {
+            let c = Arc::clone(&client);
+            let u = url.to_string();
+            let t = Arc::clone(&total);
+            let s = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                // 持续下载直到主线程置停；文件下完立即重新请求，保持并行度
+                while !s.load(Ordering::Relaxed) {
+                    match c.get(&u).send() {
+                        Ok(mut resp) => {
+                            if !resp.status().is_success() {
+                                break;
+                            }
+                            loop {
+                                match resp.read(&mut buf) {
+                                    Ok(0) => break, // 文件读完，重新请求
+                                    Ok(n) => {
+                                        t.fetch_add(n as u64, Ordering::Relaxed);
+                                        if s.load(Ordering::Relaxed) {
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => return,
+                                }
+                            }
+                        }
+                        Err(_) => break, // 该源不可达，放弃
+                    }
+                }
+            }));
         }
     }
-    fail("所有测速节点均不可达或返回数据过少".to_string())
+    let stream_count = handles.len();
+
+    // 预热 2s 摊薄 TCP 慢启动，再用 8s 稳态窗口计算速率（不受 join 超时影响 → 更准）
+    std::thread::sleep(Duration::from_secs(2));
+    let b0 = total.load(Ordering::Relaxed);
+    let window = Duration::from_secs(8);
+    std::thread::sleep(window);
+    let b1 = total.load(Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        let _ = h.join();
+    }
+
+    let bytes = b1.saturating_sub(b0);
+    let secs = window.as_secs_f64();
+    if bytes < 1_000_000 {
+        return fail("测速失败：未下载到足够数据".to_string());
+    }
+    SpeedResult {
+        down_mbps: (bytes as f64 * 8.0) / 1_000_000.0 / secs,
+        bytes,
+        secs,
+        streams: stream_count,
+        error: None,
+    }
 }
 
 // ===== 自定义目标检测：DNS 解析 + ping + TCP 端口连通 =====
