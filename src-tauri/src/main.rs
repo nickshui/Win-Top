@@ -16,6 +16,8 @@ mod network;
 mod privilege;
 #[cfg(target_os = "windows")]
 mod process;
+#[cfg(target_os = "windows")]
+mod nettraffic;
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
