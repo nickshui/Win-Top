@@ -62,6 +62,8 @@
   let listeningOnly = false;
   let timer;
 
+  let tab = "traffic"; // traffic | ports
+
   // 进程流量表：本地排序状态 + 格式化
   let tSortKey = "down_bps";
   let tSortDir = -1; // -1 降序, 1 升序
@@ -284,14 +286,37 @@
   {/if}
 </section>
 
-<section class="traffic">
-  <header class="nt-head">
-    <h2 class="section-title">进程流量 · 实时</h2>
-    {#if $netTrafficAvailable && traffic}
-      <span class="total mono">↓ {fmtRate(traffic.total_down_bps)}　↑ {fmtRate(traffic.total_up_bps)}</span>
+<div class="tabs" role="tablist">
+  <button
+    class="tab"
+    class:active={tab === "traffic"}
+    role="tab"
+    aria-selected={tab === "traffic"}
+    on:click={() => (tab = "traffic")}
+  >
+    进程流量
+  </button>
+  <button
+    class="tab"
+    class:active={tab === "ports"}
+    role="tab"
+    aria-selected={tab === "ports"}
+    on:click={() => (tab = "ports")}
+  >
+    端口连接 <span class="tab-badge">{rows.length}</span>
+  </button>
+  <span class="tab-meta">
+    {#if tab === "traffic"}
+      {#if $netTrafficAvailable && traffic}
+        <span class="total mono">↓ {fmtRate(traffic.total_down_bps)}　↑ {fmtRate(traffic.total_up_bps)}</span>
+      {/if}
+    {:else}
+      <span class="count">{filtered.length} / {rows.length} · 监听 {listenCount} · 每 3s 刷新</span>
     {/if}
-  </header>
+  </span>
+</div>
 
+{#if tab === "traffic"}
   {#if !$netTrafficAvailable}
     <div class="gate">
       <p>每进程网络流量监测基于实时 ETW，需要<strong>管理员权限</strong>。</p>
@@ -300,20 +325,19 @@
   {:else if !traffic}
     <p class="ck-hint">正在采集流量数据…</p>
   {:else}
-    <div class="top3">
-      {#each top3 as t (t.pid)}
-        <div class="tcard">
-          <div class="tname" title={t.name}>{t.name}</div>
-          <div class="tdown mono">↓ {fmtRate(t.down_bps)}</div>
-          <div class="tup mono">↑ {fmtRate(t.up_bps)}</div>
-        </div>
-      {/each}
-      {#if top3.length === 0}
-        <div class="tcard empty-card">暂无流量</div>
-      {/if}
-    </div>
+    {#if top3.length > 0}
+      <div class="top-strip">
+        <span class="ts-label">Top</span>
+        {#each top3 as t (t.pid)}
+          <span class="ts-pill" title={t.name}>
+            <span class="ts-name">{t.name}</span>
+            <span class="ts-rate mono">↓ {fmtRate(t.down_bps)}</span>
+          </span>
+        {/each}
+      </div>
+    {/if}
 
-    <div class="table-wrap traffic-table">
+    <div class="table-wrap tab-table sortable">
       <table>
         <thead>
           <tr>
@@ -344,82 +368,81 @@
       </table>
     </div>
   {/if}
-</section>
-
-<div class="toolbar">
-  <input
-    class="search"
-    bind:value={q}
-    placeholder="搜索端口 / 进程 / PID / 远端"
-    aria-label="搜索端口"
-  />
-  <div class="chips" role="group" aria-label="协议过滤">
-    {#each ["all", "TCP", "UDP"] as p}
-      <button class="chip" class:active={proto === p} on:click={() => (proto = p)}>
-        {p === "all" ? "全部" : p}
-      </button>
-    {/each}
+{:else}
+  <div class="toolbar">
+    <input
+      class="search"
+      bind:value={q}
+      placeholder="搜索端口 / 进程 / PID / 远端"
+      aria-label="搜索端口"
+    />
+    <div class="chips" role="group" aria-label="协议过滤">
+      {#each ["all", "TCP", "UDP"] as p}
+        <button class="chip" class:active={proto === p} on:click={() => (proto = p)}>
+          {p === "all" ? "全部" : p}
+        </button>
+      {/each}
+    </div>
+    <div class="chips" role="group" aria-label="地址族过滤">
+      {#each ["all", "IPv4", "IPv6"] as f}
+        <button class="chip" class:active={family === f} on:click={() => (family = f)}>
+          {f === "all" ? "全部" : f}
+        </button>
+      {/each}
+    </div>
+    <label class="toggle">
+      <input type="checkbox" bind:checked={listeningOnly} />
+      <span>仅监听</span>
+    </label>
   </div>
-  <div class="chips" role="group" aria-label="地址族过滤">
-    {#each ["all", "IPv4", "IPv6"] as f}
-      <button class="chip" class:active={family === f} on:click={() => (family = f)}>
-        {f === "all" ? "全部" : f}
-      </button>
-    {/each}
-  </div>
-  <label class="toggle">
-    <input type="checkbox" bind:checked={listeningOnly} />
-    <span>仅监听</span>
-  </label>
-  <span class="count">{filtered.length} / {rows.length} · 监听 {listenCount} · 每 3s 刷新</span>
-</div>
 
-<div class="table-wrap">
-  <table>
-    <thead>
-      <tr>
-        <th class="num">端口</th>
-        <th>协议</th>
-        <th>状态</th>
-        <th class="col-proc">进程</th>
-        <th class="num">PID</th>
-        <th class="col-remote">远端地址</th>
-        <th class="col-act">操作</th>
-      </tr>
-    </thead>
-    <tbody>
-      {#if loading}
-        <tr><td colspan="7" class="empty">加载中…</td></tr>
-      {:else if filtered.length === 0}
-        <tr><td colspan="7" class="empty">无匹配连接</td></tr>
-      {:else}
-        {#each filtered as r}
-          <tr>
-            <td class="num mono">
-              <span class="port">{r.port}</span>
-              {#if COMMON_PORTS.has(r.port)}<span class="tag">常用</span>{/if}
-            </td>
-            <td>
-              {r.protocol}
-              <span class="fam {r.family === 'IPv6' ? 'v6' : 'v4'}">{r.family === "IPv6" ? "v6" : "v4"}</span>
-            </td>
-            <td>
-              <span class="state {r.state === 'LISTEN' ? 'listen' : r.state === 'ESTABLISHED' ? 'estab' : 'other'}">
-                {r.state}
-              </span>
-            </td>
-            <td class="col-proc" title={r.process}>{r.process}</td>
-            <td class="num mono">{r.pid}</td>
-            <td class="col-remote mono">{r.remote}</td>
-            <td class="col-act">
-              <button class="danger" on:click={() => (killTarget = r)}>结束</button>
-            </td>
-          </tr>
-        {/each}
-      {/if}
-    </tbody>
-  </table>
-</div>
+  <div class="table-wrap tab-table">
+    <table>
+      <thead>
+        <tr>
+          <th class="num">端口</th>
+          <th>协议</th>
+          <th>状态</th>
+          <th class="col-proc">进程</th>
+          <th class="num">PID</th>
+          <th class="col-remote">远端地址</th>
+          <th class="col-act">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#if loading}
+          <tr><td colspan="7" class="empty">加载中…</td></tr>
+        {:else if filtered.length === 0}
+          <tr><td colspan="7" class="empty">无匹配连接</td></tr>
+        {:else}
+          {#each filtered as r}
+            <tr>
+              <td class="num mono">
+                <span class="port">{r.port}</span>
+                {#if COMMON_PORTS.has(r.port)}<span class="tag">常用</span>{/if}
+              </td>
+              <td>
+                {r.protocol}
+                <span class="fam {r.family === 'IPv6' ? 'v6' : 'v4'}">{r.family === "IPv6" ? "v6" : "v4"}</span>
+              </td>
+              <td>
+                <span class="state {r.state === 'LISTEN' ? 'listen' : r.state === 'ESTABLISHED' ? 'estab' : 'other'}">
+                  {r.state}
+                </span>
+              </td>
+              <td class="col-proc" title={r.process}>{r.process}</td>
+              <td class="num mono">{r.pid}</td>
+              <td class="col-remote mono">{r.remote}</td>
+              <td class="col-act">
+                <button class="danger" on:click={() => (killTarget = r)}>结束</button>
+              </td>
+            </tr>
+          {/each}
+        {/if}
+      </tbody>
+    </table>
+  </div>
+{/if}
 
 <!-- 结束端口进程确认（含同端口其它绑定分析）-->
 <Modal open={!!killTarget} title="结束端口进程" on:close={() => (killTarget = null)}>
@@ -933,74 +956,117 @@
   .cr-err {
     color: var(--danger);
   }
-  .traffic {
-    margin-bottom: var(--sp-6);
-    padding: var(--sp-4) var(--sp-6);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--surface);
+  /* 标签页 */
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1);
+    margin-bottom: var(--sp-4);
+    border-bottom: 1px solid var(--border);
   }
-  .traffic .total {
+  .tab {
+    position: relative;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 10px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .tab:hover {
+    color: var(--text);
+  }
+  .tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+  .tab:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .tab-badge {
+    font-size: 11px;
+    color: var(--text-muted);
+    background: var(--surface-2);
+    padding: 1px 7px;
+    border-radius: 999px;
+    margin-left: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .tab-meta {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+  }
+  .total {
     font-size: 14px;
     font-weight: 600;
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
-  .traffic thead th {
+  /* 标签内表格：单表全高，独占视图滚动 */
+  .tab-table tbody {
+    max-height: calc(100vh - 260px);
+  }
+  .sortable thead th {
     cursor: pointer;
     user-select: none;
   }
-  .traffic thead th:hover {
+  .sortable thead th:hover {
     color: var(--text);
   }
-  .traffic-table tbody {
-    max-height: 300px;
-  }
   .gate {
-    margin-top: var(--sp-3);
     display: flex;
     align-items: center;
     gap: var(--sp-4);
     flex-wrap: wrap;
     font-size: 13px;
     color: var(--text-muted);
+    padding: var(--sp-6);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
   }
-  .top3 {
-    margin: var(--sp-4) 0;
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--sp-3);
-  }
-  .tcard {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: var(--sp-3) var(--sp-4);
+  /* Top 流量进程紧凑条 */
+  .top-strip {
     display: flex;
-    flex-direction: column;
-    gap: 4px;
+    align-items: center;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+    margin-bottom: var(--sp-3);
   }
-  .tname {
-    font-size: 13px;
-    font-weight: 600;
+  .ts-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .ts-pill {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12px;
+    max-width: 260px;
+  }
+  .ts-name {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--text);
   }
-  .tdown {
-    font-size: 20px;
-    font-weight: 700;
+  .ts-rate {
     color: var(--accent);
+    font-weight: 600;
     font-variant-numeric: tabular-nums;
-  }
-  .tup {
-    font-size: 12px;
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .empty-card {
-    align-items: center;
-    justify-content: center;
-    color: var(--text-muted);
+    flex-shrink: 0;
   }
 </style>
