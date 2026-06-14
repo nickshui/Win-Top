@@ -95,6 +95,12 @@ fn get_etw_status() -> events::EtwStatusInfo {
 }
 
 #[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_nettraffic_status() -> nettraffic::NetTrafficStatus {
+    nettraffic::status()
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -103,6 +109,8 @@ fn main() {
                 let h = handle.clone();
                 move || collector::run_metrics_loop(h)
             });
+            // NetEventTier：ETW 每进程网络流量（未提权会报告 net-traffic-status=false）
+            nettraffic::start(handle.clone());
             // EventTier：ETW 实时进程事件（未提权会自行报告 etw-status=false）
             events::start(handle);
             Ok(())
@@ -118,7 +126,8 @@ fn main() {
             speed_test,
             is_elevated,
             relaunch_as_admin,
-            get_etw_status
+            get_etw_status,
+            get_nettraffic_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
