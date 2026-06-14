@@ -106,3 +106,33 @@ export async function relaunchAdmin() {
     pushToast(String(e), "error");
   }
 }
+
+// 每进程网络流量（来自 ETW Kernel-Network）
+export const netTraffic = writable(null);
+export const netTrafficAvailable = writable(false);
+export const netTrafficReason = writable("");
+
+function refreshNetTrafficStatus() {
+  invoke("get_nettraffic_status")
+    .then((s) => {
+      netTrafficAvailable.set(!!s.available);
+      netTrafficReason.set(s.reason || "");
+    })
+    .catch(() => {});
+}
+
+export function startNetTraffic() {
+  let un1, un2;
+  listen("net-traffic", (e) => netTraffic.set(e.payload)).then((u) => (un1 = u));
+  listen("net-traffic-status", (e) => {
+    netTrafficAvailable.set(!!e.payload.available);
+    netTrafficReason.set(e.payload.reason || "");
+  }).then((u) => (un2 = u));
+  // 主动查询当前状态（规避后端先于监听器 emit 的时序竞争），并稍后重查一次
+  refreshNetTrafficStatus();
+  setTimeout(refreshNetTrafficStatus, 1500);
+  return () => {
+    if (un1) un1();
+    if (un2) un2();
+  };
+}

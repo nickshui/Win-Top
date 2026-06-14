@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { startMetrics, startEvents } from "./lib/stores.js";
+  import { startMetrics, startEvents, startNetTraffic } from "./lib/stores.js";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import Overview from "./lib/views/Overview.svelte";
@@ -15,14 +15,17 @@
   let current = "overview";
   let stopMetrics;
   let stopEvents;
+  let stopNetTraffic;
 
   onMount(() => {
     stopMetrics = startMetrics();
     stopEvents = startEvents();
+    stopNetTraffic = startNetTraffic();
   });
   onDestroy(() => {
     if (stopMetrics) stopMetrics();
     if (stopEvents) stopEvents();
+    if (stopNetTraffic) stopNetTraffic();
   });
 
   const meta = {
