@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast } from "../stores.js";
+  import { pushToast, netTraffic, netTrafficAvailable, relaunchAdmin } from "../stores.js";
   import Modal from "../components/Modal.svelte";
 
   let rows = [];
@@ -61,6 +61,44 @@
   let family = "all"; // all | IPv4 | IPv6
   let listeningOnly = false;
   let timer;
+
+  // 进程流量表：本地排序状态 + 格式化
+  let tSortKey = "down_bps";
+  let tSortDir = -1; // -1 降序, 1 升序
+  function setTSort(k) {
+    if (tSortKey === k) tSortDir = -tSortDir;
+    else {
+      tSortKey = k;
+      tSortDir = k === "name" ? 1 : -1;
+    }
+  }
+  const tArrow = (k) => (tSortKey === k ? (tSortDir === -1 ? " ↓" : " ↑") : "");
+
+  const fmtRate = (bps) => {
+    if (!bps || bps < 1) return "0 B/s";
+    if (bps < 1024) return `${bps.toFixed(0)} B/s`;
+    if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+    return `${(bps / 1024 / 1024).toFixed(2)} MB/s`;
+  };
+  const fmtBytes = (n) => {
+    if (!n) return "0";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
+
+  $: traffic = $netTraffic;
+  $: trafficRows = (traffic?.rows ?? [])
+    .slice()
+    .sort((a, b) => {
+      if (tSortKey === "name") return tSortDir * a.name.localeCompare(b.name);
+      return tSortDir * (a[tSortKey] - b[tSortKey]);
+    });
+  $: top3 = (traffic?.rows ?? [])
+    .slice()
+    .sort((a, b) => b.down_bps - a.down_bps)
+    .slice(0, 3);
 
   const COMMON_PORTS = new Set([
     20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 1433, 1521,
@@ -243,6 +281,68 @@
       右侧输入框可检测任意 域名/IP/端口。
     </p>
   {/if}
+  {/if}
+</section>
+
+<section class="traffic">
+  <header class="nt-head">
+    <h2 class="section-title">进程流量 · 实时</h2>
+    {#if $netTrafficAvailable && traffic}
+      <span class="total mono">↓ {fmtRate(traffic.total_down_bps)}　↑ {fmtRate(traffic.total_up_bps)}</span>
+    {/if}
+  </header>
+
+  {#if !$netTrafficAvailable}
+    <div class="gate">
+      <p>每进程网络流量监测基于实时 ETW，需要<strong>管理员权限</strong>。</p>
+      <button class="primary" on:click={relaunchAdmin}>以管理员重启</button>
+    </div>
+  {:else if !traffic}
+    <p class="ck-hint">正在采集流量数据…</p>
+  {:else}
+    <div class="top3">
+      {#each top3 as t (t.pid)}
+        <div class="tcard">
+          <div class="tname" title={t.name}>{t.name}</div>
+          <div class="tdown mono">↓ {fmtRate(t.down_bps)}</div>
+          <div class="tup mono">↑ {fmtRate(t.up_bps)}</div>
+        </div>
+      {/each}
+      {#if top3.length === 0}
+        <div class="tcard empty-card">暂无流量</div>
+      {/if}
+    </div>
+
+    <div class="table-wrap traffic-table">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-proc" on:click={() => setTSort("name")}>进程{tArrow("name")}</th>
+            <th class="num" on:click={() => setTSort("pid")}>PID{tArrow("pid")}</th>
+            <th class="num" on:click={() => setTSort("down_bps")}>↓ 下载{tArrow("down_bps")}</th>
+            <th class="num" on:click={() => setTSort("up_bps")}>↑ 上传{tArrow("up_bps")}</th>
+            <th class="num" on:click={() => setTSort("recv_total")}>累计↓{tArrow("recv_total")}</th>
+            <th class="num" on:click={() => setTSort("sent_total")}>累计↑{tArrow("sent_total")}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#if trafficRows.length === 0}
+            <tr><td colspan="6" class="empty">暂无有流量的进程</td></tr>
+          {:else}
+            {#each trafficRows as t (t.pid)}
+              <tr>
+                <td class="col-proc" title={t.name}>{t.name}</td>
+                <td class="num mono">{t.pid}</td>
+                <td class="num mono">{fmtRate(t.down_bps)}</td>
+                <td class="num mono">{fmtRate(t.up_bps)}</td>
+                <td class="num mono">{fmtBytes(t.recv_total)}</td>
+                <td class="num mono">{fmtBytes(t.sent_total)}</td>
+              </tr>
+            {/each}
+          {/if}
+        </tbody>
+      </table>
+    </div>
   {/if}
 </section>
 
@@ -832,5 +932,75 @@
   }
   .cr-err {
     color: var(--danger);
+  }
+  .traffic {
+    margin-bottom: var(--sp-6);
+    padding: var(--sp-4) var(--sp-6);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+  .traffic .total {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .traffic thead th {
+    cursor: pointer;
+    user-select: none;
+  }
+  .traffic thead th:hover {
+    color: var(--text);
+  }
+  .traffic-table tbody {
+    max-height: 300px;
+  }
+  .gate {
+    margin-top: var(--sp-3);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .top3 {
+    margin: var(--sp-4) 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--sp-3);
+  }
+  .tcard {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--sp-3) var(--sp-4);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tname {
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tdown {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .tup {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .empty-card {
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
   }
 </style>
