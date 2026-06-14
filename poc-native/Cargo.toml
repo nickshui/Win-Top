@@ -30,3 +30,7 @@ path = "src/main.rs"
 [[bin]]
 name = "disktemp"
 path = "src/bin/disktemp.rs"
+
+[[bin]]
+name = "nettraffic"
+path = "src/bin/nettraffic.rs"
