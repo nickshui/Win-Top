@@ -41,7 +41,7 @@ pub struct CleanupResult {
     pub items: Vec<CleanupItemResult>,
 }
 
-/// 递归统计目录体积与文件数；不存在/不可读返回 (0,0)；不跟符号链接。
+/// 递归统计目录体积与文件数；不存在/不可读返回 (0,0)；不跟符号链接/junction。
 fn dir_stats(path: &Path) -> (u64, u64) {
     let mut bytes = 0u64;
     let mut files = 0u64;
@@ -50,18 +50,20 @@ fn dir_stats(path: &Path) -> (u64, u64) {
         Err(_) => return (0, 0),
     };
     for entry in rd.flatten() {
-        let ft = match entry.file_type() {
-            Ok(t) => t,
+        let p = entry.path();
+        let md = match fs::symlink_metadata(&p) {
+            Ok(m) => m,
             Err(_) => continue,
         };
+        let ft = md.file_type();
         if ft.is_symlink() {
             continue;
         }
         if ft.is_dir() {
-            let (b, f) = dir_stats(&entry.path());
+            let (b, f) = dir_stats(&p);
             bytes += b;
             files += f;
-        } else if let Ok(md) = entry.metadata() {
+        } else {
             bytes += md.len();
             files += 1;
         }
@@ -69,7 +71,7 @@ fn dir_stats(path: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
-/// 清空目录内容（保留目录本身），逐项容错。
+/// 清空目录内容（保留目录本身），逐项容错。符号链接/junction 只删链接本身、绝不递归其目标。
 fn clean_dir_contents(path: &Path) -> (u64, u64) {
     let mut freed = 0u64;
     let mut skipped = 0u64;
@@ -79,14 +81,24 @@ fn clean_dir_contents(path: &Path) -> (u64, u64) {
     };
     for entry in rd.flatten() {
         let p = entry.path();
-        let ft = match entry.file_type() {
-            Ok(t) => t,
+        let md = match fs::symlink_metadata(&p) {
+            Ok(m) => m,
             Err(_) => {
                 skipped += 1;
                 continue;
             }
         };
-        if ft.is_dir() && !ft.is_symlink() {
+        let ft = md.file_type();
+        if ft.is_symlink() {
+            // 链接/junction：删链接本身（不碰目标）。junction 按目录删，文件链接按文件删。
+            if fs::remove_dir(&p).is_ok() || fs::remove_file(&p).is_ok() {
+                // 链接本身几乎不占空间，不计入 freed
+            } else {
+                skipped += 1;
+            }
+            continue;
+        }
+        if ft.is_dir() {
             let (b, _) = dir_stats(&p);
             if fs::remove_dir_all(&p).is_ok() {
                 freed += b;
@@ -94,7 +106,7 @@ fn clean_dir_contents(path: &Path) -> (u64, u64) {
                 skipped += 1;
             }
         } else {
-            let sz = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let sz = md.len();
             if fs::remove_file(&p).is_ok() {
                 freed += sz;
             } else {
