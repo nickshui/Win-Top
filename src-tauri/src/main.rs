@@ -18,6 +18,8 @@ mod privilege;
 mod process;
 #[cfg(target_os = "windows")]
 mod nettraffic;
+#[cfg(target_os = "windows")]
+mod cleanup;
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -101,6 +103,22 @@ fn get_nettraffic_status() -> nettraffic::NetTrafficStatus {
 }
 
 #[cfg(target_os = "windows")]
+#[tauri::command]
+async fn scan_junk() -> cleanup::CleanupReport {
+    tauri::async_runtime::spawn_blocking(cleanup::scan_junk)
+        .await
+        .unwrap_or_else(|_| cleanup::CleanupReport { categories: vec![], total_bytes: 0 })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn clean_junk(ids: Vec<String>) -> cleanup::CleanupResult {
+    tauri::async_runtime::spawn_blocking(move || cleanup::clean_junk(ids))
+        .await
+        .unwrap_or_else(|_| cleanup::CleanupResult { freed_bytes: 0, items: vec![] })
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -127,7 +145,9 @@ fn main() {
             is_elevated,
             relaunch_as_admin,
             get_etw_status,
-            get_nettraffic_status
+            get_nettraffic_status,
+            scan_junk,
+            clean_junk
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
