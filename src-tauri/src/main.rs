@@ -22,6 +22,8 @@ mod nettraffic;
 mod cleanup;
 #[cfg(target_os = "windows")]
 mod memboost;
+#[cfg(target_os = "windows")]
+mod startup;
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -140,6 +142,18 @@ fn suggest_background() -> Vec<memboost::BgProc> {
 }
 
 #[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_startup() -> Vec<startup::StartupItem> {
+    startup::list_startup()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_startup_enabled(id: String, enabled: bool) -> process::ActionResult {
+    startup::set_startup_enabled(id, enabled)
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -170,7 +184,9 @@ fn main() {
             scan_junk,
             clean_junk,
             memory_boost,
-            suggest_background
+            suggest_background,
+            list_startup,
+            set_startup_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
