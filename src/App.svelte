@@ -10,6 +10,7 @@
   import Events from "./lib/views/Events.svelte";
   import About from "./lib/views/About.svelte";
   import Placeholder from "./lib/views/Placeholder.svelte";
+  import Optimize from "./lib/views/Optimize.svelte";
   import Toast from "./lib/components/Toast.svelte";
 
   let current = "overview";
@@ -47,7 +48,7 @@
       plan: "GetDiskFreeSpaceEx 容量 + WMI SMART 健康/温度/磨损，分区使用率可视化。",
     },
     toolbox: {
-      title: "工具箱",
+      title: "优化加速",
       icon: "terminal",
       plan: "命令卡片参数化，长任务异步流式输出，需管理员的操作走按需提权。",
     },
@@ -75,6 +76,8 @@
         <Network />
       {:else if current === "disk"}
         <Disk />
+      {:else if current === "toolbox"}
+        <Optimize />
       {:else if current === "about"}
         <About />
       {:else}
