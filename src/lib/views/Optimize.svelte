@@ -116,16 +116,31 @@
     }
   }
 
-  async function toggleStartup(item) {
+  let toggleTarget = null; // 待确认切换的启动项
+  let togglingId = null; // 切换请求进行中的 id
+
+  function requestToggle(item) {
+    if (togglingId) return;
+    toggleTarget = item;
+  }
+
+  async function confirmToggle() {
+    const item = toggleTarget;
+    toggleTarget = null;
+    if (!item) return;
+    const next = !item.enabled;
+    togglingId = item.id;
     try {
-      const r = await invoke("set_startup_enabled", { id: item.id, enabled: !item.enabled });
+      const r = await invoke("set_startup_enabled", { id: item.id, enabled: next });
       if (r.success) {
-        item.enabled = !item.enabled;
+        item.enabled = next;
         startupItems = startupItems;
       }
       pushToast(r.message, r.success ? "ok" : "error");
     } catch (e) {
       pushToast("操作失败：" + e, "error");
+    } finally {
+      togglingId = null;
     }
   }
 
@@ -239,8 +254,17 @@
               <td>{locLabel(item.location)}</td>
               <td class="col-cmd mono" title={item.command}>{item.command}</td>
               <td class="col-sw">
-                <button class="switch" class:on={item.enabled} on:click={() => toggleStartup(item)} aria-pressed={item.enabled}>
-                  {item.enabled ? "已启用" : "已禁用"}
+                <button
+                  class="sw"
+                  class:on={item.enabled}
+                  class:pending={togglingId === item.id}
+                  on:click={() => requestToggle(item)}
+                  disabled={togglingId === item.id}
+                  role="switch"
+                  aria-checked={item.enabled}
+                  aria-label={(item.enabled ? "禁用 " : "启用 ") + item.name}
+                >
+                  <span class="sw-knob"></span>
                 </button>
               </td>
             </tr>
@@ -266,6 +290,30 @@
     <button class="ghost" on:click={() => (closeOpen = false)}>取消</button>
     <button class="danger" on:click={closeSelectedBg}>确认结束</button>
   </div>
+</Modal>
+
+<Modal
+  open={!!toggleTarget}
+  title={toggleTarget && toggleTarget.enabled ? "禁用启动项" : "启用启动项"}
+  on:close={() => (toggleTarget = null)}
+>
+  {#if toggleTarget}
+    <p>
+      确定要{toggleTarget.enabled ? "禁用" : "启用"}
+      <strong>{toggleTarget.name}</strong> 的开机自启吗？
+    </p>
+    <p class="muted">
+      {toggleTarget.enabled
+        ? "禁用后该程序将不再随 Windows 启动（可随时重新启用）。"
+        : "启用后该程序将随 Windows 启动。"}
+    </p>
+    <div class="modal-actions">
+      <button class="ghost" on:click={() => (toggleTarget = null)}>取消</button>
+      <button class="primary" on:click={confirmToggle}>
+        确认{toggleTarget.enabled ? "禁用" : "启用"}
+      </button>
+    </div>
+  {/if}
 </Modal>
 
 <style>
@@ -450,16 +498,43 @@
   }
   .danger:hover { background: rgba(239, 68, 68, 0.12); }
   .danger:disabled { opacity: 0.5; cursor: default; }
-  .switch {
+  .sw {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    padding: 0;
     border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-muted);
-    font-family: inherit;
-    font-size: 12px;
-    padding: 4px 12px;
     border-radius: 999px;
+    background: var(--surface-2);
     cursor: pointer;
+    vertical-align: middle;
+    transition: background 0.25s ease, border-color 0.25s ease;
   }
-  .switch.on { color: var(--ok); border-color: rgba(34, 197, 94, 0.4); background: rgba(34, 197, 94, 0.12); }
+  .sw-knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.25s ease;
+  }
+  .sw.on {
+    background: rgba(34, 197, 94, 0.25);
+    border-color: rgba(34, 197, 94, 0.5);
+  }
+  .sw.on .sw-knob {
+    transform: translateX(20px);
+    background: var(--ok);
+  }
+  .sw:hover { border-color: var(--accent); }
+  .sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sw.pending { opacity: 0.55; cursor: default; }
+  .sw.pending .sw-knob { animation: sw-pulse 0.8s ease-in-out infinite; }
+  @keyframes sw-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
   .modal-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
 </style>
