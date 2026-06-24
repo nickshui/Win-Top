@@ -20,6 +20,8 @@ mod process;
 mod nettraffic;
 #[cfg(target_os = "windows")]
 mod cleanup;
+#[cfg(target_os = "windows")]
+mod memboost;
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -119,6 +121,25 @@ async fn clean_junk(ids: Vec<String>) -> cleanup::CleanupResult {
 }
 
 #[cfg(target_os = "windows")]
+#[tauri::command]
+async fn memory_boost() -> memboost::BoostResult {
+    tauri::async_runtime::spawn_blocking(memboost::memory_boost)
+        .await
+        .unwrap_or_else(|_| memboost::BoostResult {
+            freed_mb: 0.0,
+            trimmed_count: 0,
+            before_avail_mb: 0.0,
+            after_avail_mb: 0.0,
+        })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn suggest_background() -> Vec<memboost::BgProc> {
+    memboost::suggest_background()
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -147,7 +168,9 @@ fn main() {
             get_etw_status,
             get_nettraffic_status,
             scan_junk,
-            clean_junk
+            clean_junk,
+            memory_boost,
+            suggest_background
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");
