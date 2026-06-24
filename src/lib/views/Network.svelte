@@ -62,7 +62,7 @@
   let listeningOnly = false;
   let timer;
 
-  let tab = "traffic"; // traffic | ports
+  let tab = "ports"; // ports | traffic
 
   // 进程流量表：本地排序状态 + 格式化
   let tSortKey = "down_bps";
@@ -289,21 +289,21 @@
 <div class="tabs" role="tablist">
   <button
     class="tab"
-    class:active={tab === "traffic"}
-    role="tab"
-    aria-selected={tab === "traffic"}
-    on:click={() => (tab = "traffic")}
-  >
-    进程流量
-  </button>
-  <button
-    class="tab"
     class:active={tab === "ports"}
     role="tab"
     aria-selected={tab === "ports"}
     on:click={() => (tab = "ports")}
   >
     端口连接 <span class="tab-badge">{rows.length}</span>
+  </button>
+  <button
+    class="tab"
+    class:active={tab === "traffic"}
+    role="tab"
+    aria-selected={tab === "traffic"}
+    on:click={() => (tab = "traffic")}
+  >
+    进程流量
   </button>
   <span class="tab-meta">
     {#if tab === "traffic"}
