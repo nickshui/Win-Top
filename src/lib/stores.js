@@ -29,6 +29,18 @@ export function startMetrics() {
 
 export { MAX_HISTORY };
 
+// 历史趋势数据（来自后端的环形缓冲区）
+export const historyData = writable([]);
+
+export async function loadHistory(n = 120) {
+  try {
+    const data = await invoke("get_history", { n });
+    historyData.set(data);
+  } catch (e) {
+    // silently fail
+  }
+}
+
 // 轻量 Toast 通知
 export const toasts = writable([]);
 let toastId = 0;
@@ -135,4 +147,40 @@ export function startNetTraffic() {
     if (un1) un1();
     if (un2) un2();
   };
+}
+
+// 每进程磁盘 I/O 追踪（来自 disk_io 线程的 disk-io 事件）
+export const diskIo = writable(null);
+
+export function startDiskIo() {
+  let un;
+  listen("disk-io", (e) => diskIo.set(e.payload)).then((u) => (un = u));
+  return () => { if (un) un(); };
+}
+
+// 磁盘容量报告（供加速中心宫格展示系统盘用量）
+export const diskReport = writable(null);
+
+export async function loadDiskReport() {
+  try {
+    const r = await invoke("get_disk_report");
+    diskReport.set(r);
+    return r;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 定时清理通知
+export const cleanupNotification = writable(null);
+
+export function startCleanupNotifications() {
+  let un;
+  listen("scheduled-cleanup", (e) => {
+    cleanupNotification.set(e.payload);
+    if (e.payload?.total_mb > 0) {
+      pushToast(`定时清理：发现 ${e.payload.total_mb.toFixed(0)} MB 可清理空间`, "ok");
+    }
+  }).then((u) => (un = u));
+  return () => { if (un) un(); };
 }

@@ -21,9 +21,79 @@ mod nettraffic;
 #[cfg(target_os = "windows")]
 mod cleanup;
 #[cfg(target_os = "windows")]
+mod history;
+#[cfg(target_os = "windows")]
 mod memboost;
 #[cfg(target_os = "windows")]
 mod startup;
+#[cfg(target_os = "windows")]
+mod export;
+#[cfg(target_os = "windows")]
+mod scheduler;
+#[cfg(target_os = "windows")]
+mod gpu;
+#[cfg(target_os = "windows")]
+mod geoip;
+#[cfg(target_os = "windows")]
+mod firewall;
+#[cfg(target_os = "windows")]
+mod restore;
+#[cfg(target_os = "windows")]
+mod file_unlock;
+#[cfg(target_os = "windows")]
+mod disk_usage;
+#[cfg(target_os = "windows")]
+mod mft_scan;
+#[cfg(target_os = "windows")]
+mod disk_io;
+#[cfg(target_os = "windows")]
+mod health_check;
+#[cfg(target_os = "windows")]
+mod services;
+#[cfg(target_os = "windows")]
+mod visual_effects;
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_gpus() -> Result<Vec<gpu::GpuInfo>, String> {
+    gpu::list_gpus()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn geo_lookup(ip: String) -> Option<geoip::GeoInfo> {
+    geoip::lookup(&ip)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_firewall_rules() -> Result<Vec<firewall::FirewallRule>, String> {
+    firewall::list_rules()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn toggle_firewall_rule(name: String, enabled: bool) -> Result<String, String> {
+    firewall::toggle_rule(&name, enabled)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_restore_points() -> Result<Vec<restore::RestorePoint>, String> {
+    restore::list_restore_points()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn create_restore_point(description: String) -> Result<String, String> {
+    restore::create_restore_point(&description)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn find_file_locks(file_path: String) -> Result<Vec<file_unlock::FileLockInfo>, String> {
+    file_unlock::find_locks(&file_path)
+}
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -45,6 +115,12 @@ fn set_process_priority(pid: u32, level: String) -> process::ActionResult {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+fn get_process_detail(pid: u32) -> Result<process::ProcessDetail, String> {
+    process::get_process_detail(pid)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 fn get_connections() -> Result<Vec<network::PortRow>, String> {
     network::list_connections()
 }
@@ -53,6 +129,46 @@ fn get_connections() -> Result<Vec<network::PortRow>, String> {
 #[tauri::command]
 fn get_disk_report() -> disk::DiskReport {
     disk::report()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn scan_directory(dir_path: String, top_n: usize) -> disk_usage::UsageReport {
+    tauri::async_runtime::spawn_blocking(move || disk_usage::scan_directory(dir_path, top_n))
+        .await
+        .unwrap_or_else(|_| disk_usage::UsageReport {
+            large_files: vec![],
+            dirs: vec![],
+            scanned: 0,
+            errors: 0,
+            source: "walk".into(),
+            elapsed_ms: 0,
+        })
+}
+
+/// 按盘符扫描整卷：优先走 MFT（需管理员、仅 NTFS），失败时回退到逐目录递归。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn scan_volume(drive: String, top_n: usize) -> disk_usage::UsageReport {
+    tauri::async_runtime::spawn_blocking(move || {
+        match mft_scan::scan_volume(&drive, top_n) {
+            Ok(report) => report,
+            Err(_) => {
+                // 回退：从盘根递归遍历（慢，但不依赖 MFT/权限）
+                let root = format!("{}\\", drive.trim().trim_end_matches('\\').trim_end_matches(':'));
+                disk_usage::scan_directory(root, top_n)
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| disk_usage::UsageReport {
+        large_files: vec![],
+        dirs: vec![],
+        scanned: 0,
+        errors: 0,
+        source: "walk".into(),
+        elapsed_ms: 0,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -154,6 +270,94 @@ fn set_startup_enabled(id: String, enabled: bool) -> process::ActionResult {
 }
 
 #[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_history(n: usize) -> Vec<collector::MetricsSnapshot> {
+    history::recent(n)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn export_snapshot() -> Result<export::ExportResult, String> {
+    tauri::async_runtime::spawn_blocking(export::export_snapshot)
+        .await
+        .unwrap_or_else(|_| Err("导出任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn export_processes_csv() -> Result<export::ExportResult, String> {
+    tauri::async_runtime::spawn_blocking(export::export_processes_csv)
+        .await
+        .unwrap_or_else(|_| Err("导出任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_cleanup_schedule(hours: u64) -> Result<String, String> {
+    scheduler::set_schedule_interval(hours)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn run_health_check() -> Result<health_check::HealthReport, String> {
+    health_check::run_health_check()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_services() -> Result<Vec<services::ServiceInfo>, String> {
+    services::list_non_ms_services()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn set_service_startup(name: String, startup_type: String) -> services::ServiceActionResult {
+    tauri::async_runtime::spawn_blocking(move || services::set_service_startup(&name, &startup_type))
+        .await
+        .unwrap_or_else(|_| services::ServiceActionResult { success: false, message: "操作异常退出".into(), can_rollback: false })
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn restore_service(name: String) -> services::ServiceActionResult {
+    services::restore_service(&name)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn restore_all_services() -> services::ServiceActionResult {
+    services::restore_all_services()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn list_modified_services() -> Vec<(String, String)> {
+    services::list_modified_services()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_visual_fx_state() -> Result<visual_effects::VisualFxState, String> {
+    visual_effects::get_current_state()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn apply_visual_fx_preset(preset: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || visual_effects::apply_preset(&preset))
+        .await
+        .unwrap_or_else(|_| Err("视觉效果切换任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn restore_visual_fx() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(visual_effects::restore_defaults)
+        .await
+        .unwrap_or_else(|_| Err("视觉效果还原任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -165,15 +369,22 @@ fn main() {
             // NetEventTier：ETW 每进程网络流量（未提权会报告 net-traffic-status=false）
             nettraffic::start(handle.clone());
             // EventTier：ETW 实时进程事件（未提权会自行报告 etw-status=false）
-            events::start(handle);
+            events::start(handle.clone());
+            // 每进程磁盘 I/O 追踪（低权限，每 2 秒采集）
+            disk_io::start(handle.clone());
+            // 初始化定时清理调度器
+            scheduler::init_scheduler(handle.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_processes,
             terminate_process,
             set_process_priority,
+            get_process_detail,
             get_connections,
             get_disk_report,
+            scan_directory,
+            scan_volume,
             network_checkup,
             probe_target,
             speed_test,
@@ -186,7 +397,27 @@ fn main() {
             memory_boost,
             suggest_background,
             list_startup,
-            set_startup_enabled
+            set_startup_enabled,
+            get_history,
+            export_snapshot,
+            export_processes_csv,
+            set_cleanup_schedule,
+            get_gpus,
+            geo_lookup,
+            list_firewall_rules,
+            toggle_firewall_rule,
+            list_restore_points,
+            create_restore_point,
+            find_file_locks,
+            run_health_check,
+            list_services,
+            set_service_startup,
+            restore_service,
+            restore_all_services,
+            list_modified_services,
+            get_visual_fx_state,
+            apply_visual_fx_preset,
+            restore_visual_fx
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");

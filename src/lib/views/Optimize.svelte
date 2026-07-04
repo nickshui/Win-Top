@@ -1,247 +1,323 @@
 <script>
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast, elevated, relaunchAdmin } from "../stores.js";
+  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport } from "../stores.js";
   import Modal from "../components/Modal.svelte";
 
-  let tab = "optimize"; // optimize | startup
+  export let navigate = () => {};
 
-  // 清理
-  let scanning = false;
-  let report = null;
-  let selected = new Set();
-  let optimizing = false;
-  let result = null;
-  let confirmOpen = false;
+  // ===== 加速中心首页 =====
+  let tab = "home";
 
-  // 建议关闭后台
-  let bgList = [];
-  let bgSelected = new Set();
-  let closeOpen = false;
+  // 一键加速：串联垃圾扫描 + 清理 + 内存释放
+  let boosting = false;
+  let boostDone = false;
+  let junkBytes = 0;           // 当前可清理垃圾字节
+  let junkScanning = false;
+  let lastBoost = null;        // { freedBytes, freedMb }
 
-  // 启动项
-  let startupItems = [];
-  let startupLoading = true;
+  // 进程 / 启动项 摘要
+  let procCount = 0;
+  let startupEnabledCount = 0;
+
+  $: memLoad = $metrics?.mem_load ?? 0;
+  $: sysVol = ($diskReport?.volumes ?? []).find((v) => /^c/i.test(v.drive)) ?? ($diskReport?.volumes ?? [])[0] ?? null;
+
+  async function scanJunkQuiet() {
+    junkScanning = true;
+    try {
+      const r = await invoke("scan_junk");
+      junkBytes = r.total_bytes ?? 0;
+    } catch (e) { junkBytes = 0; } finally { junkScanning = false; }
+  }
+
+  async function loadHomeSummary() {
+    loadDiskReport();
+    scanJunkQuiet();
+    try {
+      const procs = await invoke("get_processes");
+      procCount = procs.length;
+    } catch (e) {}
+    try {
+      const items = await invoke("list_startup");
+      startupItems = items;
+      startupEnabledCount = items.filter((s) => s.enabled).length;
+    } catch (e) {}
+  }
+
+  async function oneClickBoost() {
+    if (boosting) return;
+    boosting = true;
+    boostDone = false;
+    try {
+      const rep = await invoke("scan_junk");
+      const ids = rep.categories
+        .filter((c) => c.available && (!c.needs_admin || $elevated))
+        .map((c) => c.id);
+      const cleanR = ids.length ? await invoke("clean_junk", { ids }) : { freed_bytes: 0 };
+      const boostR = await invoke("memory_boost");
+      lastBoost = { freedBytes: cleanR.freed_bytes ?? 0, freedMb: boostR.freed_mb ?? 0 };
+      pushToast(`加速完成：释放磁盘 ${fmtBytes(lastBoost.freedBytes)}、内存 ${lastBoost.freedMb.toFixed(0)} MB`, "ok");
+      boostDone = true;
+      await scanJunkQuiet();
+    } catch (e) {
+      pushToast("加速失败：" + e, "error");
+    } finally {
+      boosting = false;
+    }
+  }
+
+  // ===== 系统体检 =====
+  let healthLoading = false, healthReport = null;
+  async function runHealthCheck() {
+    healthLoading = true; healthReport = null;
+    try { healthReport = await invoke("run_health_check"); }
+    catch (e) { pushToast("体检失败：" + e, "error"); }
+    finally { healthLoading = false; }
+  }
+  const scoreColor = (s) => (s >= 80 ? "ok" : s >= 60 ? "warn" : "danger");
+
+  // 体检页「一键优化」：确认后直接执行清理+内存释放，完成后刷新体检分数
+  let optConfirm = false, optimizing = false;
+  function prepareOptimize() { optConfirm = true; }
+  async function runOptimize() {
+    optConfirm = false; optimizing = true;
+    try {
+      const scan = await invoke("scan_junk");
+      const ids = scan.categories.filter(c => c.available && (!c.needs_admin || $elevated)).map(c => c.id);
+      const cleanR = ids.length ? await invoke("clean_junk", { ids }) : { freed_bytes: 0 };
+      const boostR = await invoke("memory_boost");
+      pushToast(`已释放磁盘 ${fmtBytes(cleanR.freed_bytes)}，内存 ${boostR.freed_mb.toFixed(0)} MB`, "ok");
+      // 重新体检，反映优化后的分数变化
+      healthReport = await invoke("run_health_check");
+      scanJunkQuiet();
+    } catch (e) { pushToast("优化失败：" + e, "error"); }
+    finally { optimizing = false; }
+  }
+
+  // ===== 垃圾清理 =====
+  let scanLoading = false, cleanReport = null, selectedCats = new Set(), cleaning = false, cleanResult = null, cleanConfirm = false, createRpBeforeClean = true;
+  async function scanJunk() {
+    scanLoading = true; cleanReport = null; cleanResult = null;
+    try {
+      cleanReport = await invoke("scan_junk");
+      selectedCats = new Set(cleanReport.categories.filter(c => c.available && (!c.needs_admin || $elevated)).map(c => c.id));
+    } catch (e) { pushToast("扫描失败：" + e, "error"); } finally { scanLoading = false; }
+  }
+  function toggleCat(id) { const s = new Set(selectedCats); if (s.has(id)) s.delete(id); else s.add(id); selectedCats = s; }
+  $: selectedBytes = cleanReport ? cleanReport.categories.filter(c => selectedCats.has(c.id)).reduce((s, c) => s + c.bytes, 0) : 0;
+  async function doClean() {
+    cleanConfirm = false; cleaning = true;
+    try {
+      if (createRpBeforeClean) { try { await invoke("create_restore_point", { description: "Win-Top 清理前自动还原点" }); } catch (e) { } }
+      const cleanR = await invoke("clean_junk", { ids: [...selectedCats] });
+      const boostR = await invoke("memory_boost");
+      pushToast(`释放磁盘 ${fmtBytes(cleanR.freed_bytes)}，释放内存 ${boostR.freed_mb.toFixed(0)} MB`, "ok");
+      cleanResult = cleanR;
+      cleanReport = await invoke("scan_junk");
+      selectedCats = new Set(cleanReport.categories.filter(c => c.available && (!c.needs_admin || $elevated)).map(c => c.id));
+    } catch (e) { pushToast("优化失败：" + e, "error"); } finally { cleaning = false; }
+  }
+
+  // ===== 开机启动（保留原始设计） =====
+  let startupItems = [], startupLoading = true, startupToggleTarget = null, startupPending = null;
+
+  async function loadStartup() {
+    startupLoading = true;
+    try { startupItems = await invoke("list_startup"); }
+    catch (e) { pushToast("读取启动项失败：" + e, "error"); }
+    finally { startupLoading = false; }
+  }
+
+  function confirmToggle(item) {
+    startupToggleTarget = item;
+  }
+
+  async function doToggle() {
+    const item = startupToggleTarget;
+    startupToggleTarget = null;
+    startupPending = item.id;
+    try {
+      const r = await invoke("set_startup_enabled", { id: item.id, enabled: !item.enabled });
+      if (r.success) {
+        item.enabled = !item.enabled;
+        startupItems = startupItems;
+      }
+      pushToast(r.message, r.success ? "ok" : "error");
+    } catch (e) { pushToast("操作失败：" + e, "error"); }
+    finally { startupPending = null; }
+  }
 
   const fmtBytes = (n) => {
     if (!n) return "0 B";
     if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
     return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
   };
+  const locLabel = (l) => ({ "HKCU-Run": "用户注册表", "HKLM-Run": "系统注册表", "User-Folder": "用户启动文件夹", "Common-Folder": "公共启动文件夹" })[l] || l;
 
-  function canUse(cat) {
-    return cat.available && !(cat.needs_admin && !$elevated);
-  }
-
-  async function scan() {
-    scanning = true;
-    result = null;
-    bgList = [];
-    try {
-      report = await invoke("scan_junk");
-      selected = new Set(report.categories.filter(canUse).map((c) => c.id));
-    } catch (e) {
-      pushToast("扫描失败：" + e, "error");
-    } finally {
-      scanning = false;
-    }
-  }
-
-  function toggleCat(id) {
-    const s = new Set(selected);
-    if (s.has(id)) s.delete(id);
-    else s.add(id);
-    selected = s;
-  }
-
-  $: selectedBytes = report
-    ? report.categories.filter((c) => selected.has(c.id)).reduce((a, c) => a + c.bytes, 0)
-    : 0;
-
-  async function runOptimize() {
-    confirmOpen = false;
-    optimizing = true;
-    try {
-      const ids = [...selected];
-      const clean = await invoke("clean_junk", { ids });
-      const boost = await invoke("memory_boost");
-      result = {
-        freed_bytes: clean.freed_bytes,
-        freed_mb: boost.freed_mb,
-        trimmed_count: boost.trimmed_count,
-      };
-      bgList = await invoke("suggest_background");
-      bgSelected = new Set();
-      report = await invoke("scan_junk");
-      selected = new Set(report.categories.filter(canUse).map((c) => c.id));
-    } catch (e) {
-      pushToast("优化失败：" + e, "error");
-    } finally {
-      optimizing = false;
-    }
-  }
-
-  function toggleBg(pid) {
-    const s = new Set(bgSelected);
-    if (s.has(pid)) s.delete(pid);
-    else s.add(pid);
-    bgSelected = s;
-  }
-
-  async function closeSelectedBg() {
-    closeOpen = false;
-    const pids = [...bgSelected];
-    for (const pid of pids) {
-      try {
-        const r = await invoke("terminate_process", { pid });
-        pushToast(r.message, r.success ? "ok" : "error");
-      } catch (e) {
-        pushToast("结束失败：" + e, "error");
-      }
-    }
-    bgList = bgList.filter((b) => !bgSelected.has(b.pid));
-    bgSelected = new Set();
-  }
-
-  async function loadStartup() {
-    startupLoading = true;
-    try {
-      startupItems = await invoke("list_startup");
-    } catch (e) {
-      pushToast("读取启动项失败：" + e, "error");
-    } finally {
-      startupLoading = false;
-    }
-  }
-
-  let toggleTarget = null; // 待确认切换的启动项
-  let togglingId = null; // 切换请求进行中的 id
-
-  function requestToggle(item) {
-    if (togglingId) return;
-    toggleTarget = item;
-  }
-
-  async function confirmToggle() {
-    const item = toggleTarget;
-    toggleTarget = null;
-    if (!item) return;
-    const next = !item.enabled;
-    togglingId = item.id;
-    try {
-      const r = await invoke("set_startup_enabled", { id: item.id, enabled: next });
-      if (r.success) {
-        item.enabled = next;
-        startupItems = startupItems;
-      }
-      pushToast(r.message, r.success ? "ok" : "error");
-    } catch (e) {
-      pushToast("操作失败：" + e, "error");
-    } finally {
-      togglingId = null;
-    }
-  }
-
-  const locLabel = (l) =>
-    ({
-      "HKCU-Run": "用户注册表",
-      "HKLM-Run": "系统注册表",
-      "User-Folder": "用户启动文件夹",
-      "Common-Folder": "公共启动文件夹",
-    })[l] || l;
-
-  onMount(loadStartup);
+  onMount(() => { loadStartup(); loadHomeSummary(); });
 </script>
 
 {#if !$elevated}
   <div class="admin-banner">
-    <span>部分操作需要管理员权限（系统垃圾清理 / 系统注册表启动项 / 裁剪系统进程）。</span>
-    <button class="primary" on:click={relaunchAdmin}>以管理员重启</button>
+    <span>部分功能需要<strong>管理员权限</strong>。</span>
+    <button class="elevate-btn" on:click={relaunchAdmin}>以管理员重启</button>
   </div>
 {/if}
 
-<div class="tabs" role="tablist">
-  <button class="tab" class:active={tab === "optimize"} on:click={() => (tab = "optimize")}>一键优化</button>
+<div class="tabs">
+  <button class="tab" class:active={tab === "home"} on:click={() => (tab = "home")}>总览</button>
+  <button class="tab" class:active={tab === "health"} on:click={() => (tab = "health")}>系统体检</button>
+  <button class="tab" class:active={tab === "cleanup"} on:click={() => (tab = "cleanup")}>垃圾清理</button>
   <button class="tab" class:active={tab === "startup"} on:click={() => (tab = "startup")}>
-    启动项 <span class="tab-badge">{startupItems.length}</span>
+    开机启动
+    <span class="tab-badge">{startupItems.filter(s => s.enabled).length}</span>
   </button>
 </div>
 
-{#if tab === "optimize"}
-  <section class="opt">
-    {#if !report}
-      <div class="scan-intro">
-        <p class="muted">扫描临时文件、缓存、回收站等可清理项，并可一键释放内存。</p>
-        <button class="primary big" on:click={scan} disabled={scanning}>
-          {scanning ? "扫描中…" : "扫描垃圾"}
-        </button>
+<!-- ===== 总览：加速中心 ===== -->
+{#if tab === "home"}
+  <div class="boost-card">
+    <div class="boost-head">
+      <div>
+        <h3 class="boost-title">一键加速</h3>
+        <p class="boost-sub">清理内存和临时文件，减少电脑卡顿</p>
       </div>
-    {:else}
-      <div class="summary">
-        <div class="gauge">
-          <div class="gauge-num mono">{fmtBytes(selectedBytes)}</div>
-          <div class="gauge-label muted">已选可清理</div>
-        </div>
-        <div class="summary-actions">
-          <button class="ghost" on:click={scan} disabled={scanning}>{scanning ? "扫描中…" : "重新扫描"}</button>
-          <button class="primary" on:click={() => (confirmOpen = true)} disabled={optimizing || selected.size === 0}>
-            {optimizing ? "优化中…" : "一键优化"}
-          </button>
-        </div>
+    </div>
+    <div class="boost-metrics">
+      <div class="bm">
+        <div class="bm-bar"><div class="bm-fill {memLoad >= 85 ? 'danger' : memLoad >= 70 ? 'warn' : 'ok'}" style="height:{Math.min(100, memLoad)}%"></div></div>
+        <div class="bm-text"><span class="bm-num mono">{memLoad}%</span><span class="bm-label">内存占用</span></div>
       </div>
+      <div class="bm">
+        <div class="bm-bar"><div class="bm-fill warn" style="height:{junkBytes > 0 ? Math.min(100, junkBytes / (2 * 1024 * 1024 * 1024) * 100) : 0}%"></div></div>
+        <div class="bm-text"><span class="bm-num mono">{junkScanning ? "…" : fmtBytes(junkBytes)}</span><span class="bm-label">临时文件</span></div>
+      </div>
+    </div>
+    <button class="boost-btn" class:done={boostDone && !boosting} on:click={oneClickBoost} disabled={boosting}>
+      {#if boosting}加速中…{:else if boostDone}&#10003; 加速完成{:else}一键加速{/if}
+    </button>
+    {#if boostDone && lastBoost}
+      <p class="boost-result">本次释放磁盘 <b>{fmtBytes(lastBoost.freedBytes)}</b> · 内存 <b>{lastBoost.freedMb.toFixed(0)} MB</b></p>
+    {/if}
+  </div>
 
-      <div class="cats">
-        {#each report.categories as c (c.id)}
-          <label class="cat" class:off={!canUse(c)}>
-            <input type="checkbox" checked={selected.has(c.id)} disabled={!canUse(c)} on:change={() => toggleCat(c.id)} />
-            <span class="cat-label">
-              {c.label}
-              {#if c.needs_admin}<span class="lock" title="需管理员">🔒</span>{/if}
-              {#if !c.available}<span class="muted">（不可用）</span>{/if}
-            </span>
-            <span class="cat-size mono">{fmtBytes(c.bytes)}</span>
-          </label>
+  <div class="entry-grid">
+    <button class="entry" on:click={() => (tab = "health")}>
+      <div class="entry-head"><span class="entry-name">全面体检</span></div>
+      <div class="entry-info">
+        {#if healthReport}<span class="entry-strong {scoreColor(healthReport.score)}">{healthReport.score} 分</span>
+        {:else}<span class="entry-hint">未检测</span>{/if}
+      </div>
+    </button>
+
+    <button class="entry" on:click={() => navigate("process")}>
+      <div class="entry-head"><span class="entry-name">进程管理</span></div>
+      <div class="entry-info"><span class="entry-strong">{procCount}</span><span class="entry-unit">个进程</span></div>
+    </button>
+
+    <button class="entry" on:click={() => (tab = "cleanup")}>
+      <div class="entry-head"><span class="entry-name">深度清理</span></div>
+      <div class="entry-info">
+        {#if sysVol}<span class="entry-strong mono">{fmtBytes(sysVol.total - sysVol.free)}</span><span class="entry-unit mono">/ {fmtBytes(sysVol.total)}</span>
+        {:else}<span class="entry-hint">读取中…</span>{/if}
+      </div>
+    </button>
+
+    <button class="entry" on:click={() => (tab = "startup")}>
+      <div class="entry-head"><span class="entry-name">开机管理</span></div>
+      <div class="entry-info"><span class="entry-strong">{startupEnabledCount}</span><span class="entry-unit">项启用</span></div>
+    </button>
+  </div>
+
+<!-- ===== 系统体检 ===== -->
+{:else if tab === "health"}
+  {#if !healthReport}
+    <div class="center-cta">
+      <p class="muted">一键扫描垃圾、启动项、资源占用。</p>
+      <button class="primary" on:click={runHealthCheck} disabled={healthLoading}>{healthLoading ? "扫描中…" : "开始体检"}</button>
+    </div>
+  {:else}
+    <div class="health-top">
+      <div class="health-score {scoreColor(healthReport.score)}">{healthReport.score}<span>分</span></div>
+      <div class="health-meta">
+        <div>垃圾可清理 <b>{fmtBytes(healthReport.junk_mb * 1024 * 1024)}</b></div>
+        <div>自启程序 <b>{healthReport.startup_count} 项</b></div>
+        <div>高占用进程 <b>{healthReport.heavy_procs.length} 个</b></div>
+      </div>
+      <div class="health-actions">
+        <button class="ghost" on:click={runHealthCheck} disabled={healthLoading || optimizing}>重新体检</button>
+        <button class="primary" on:click={prepareOptimize} disabled={optimizing || healthLoading}>{optimizing ? "优化中…" : "一键优化"}</button>
+      </div>
+    </div>
+    {#if healthReport.issues.length > 0}
+      <div class="issue-list">
+        {#each healthReport.issues as issue}
+          <div class="issue-row"><span>{issue.title}</span><span class="issue-detail">{issue.detail}</span></div>
         {/each}
       </div>
-
-      {#if result}
-        <div class="result">
-          <div class="res-item"><span class="muted">释放磁盘</span><b class="mono">{fmtBytes(result.freed_bytes)}</b></div>
-          <div class="res-item"><span class="muted">释放内存</span><b class="mono">{result.freed_mb.toFixed(0)} MB</b></div>
-          <div class="res-item"><span class="muted">裁剪进程</span><b class="mono">{result.trimmed_count}</b></div>
-        </div>
-
-        {#if bgList.length > 0}
-          <div class="bg">
-            <div class="bg-head">
-              <h3>建议关闭的后台进程</h3>
-              <button class="danger" on:click={() => (closeOpen = true)} disabled={bgSelected.size === 0}>
-                结束所选 ({bgSelected.size})
-              </button>
-            </div>
-            <div class="bg-list">
-              {#each bgList as b (b.pid)}
-                <label class="bg-item">
-                  <input type="checkbox" checked={bgSelected.has(b.pid)} on:change={() => toggleBg(b.pid)} />
-                  <span class="bg-name">{b.name}</span>
-                  <span class="muted mono">PID {b.pid}</span>
-                  <span class="bg-mem mono">{b.mem_mb.toFixed(0)} MB</span>
-                </label>
-              {/each}
-            </div>
-          </div>
-        {/if}
-      {/if}
     {/if}
-  </section>
-{:else}
+    {#if healthReport.suggestions.length > 0}
+      <div class="health-tips">{#each healthReport.suggestions as s}<div class="tip">{s}</div>{/each}</div>
+    {/if}
+  {/if}
+
+  <Modal open={optConfirm} title="确认一键优化" on:close={() => (optConfirm = false)}>
+    {#if healthReport}
+      <p>将执行以下操作：</p>
+      <ul class="opt-list">
+        <li>清理系统垃圾（约 {fmtBytes(healthReport.junk_mb * 1024 * 1024)}）</li>
+        <li>释放进程占用的物理内存</li>
+      </ul>
+      <p class="muted">清理为删除操作、不可撤销；被占用的文件会自动跳过。完成后将重新体检。</p>
+      <div class="modal-actions">
+        <button class="ghost" on:click={() => (optConfirm = false)}>取消</button>
+        <button class="primary" on:click={runOptimize}>确认优化</button>
+      </div>
+    {/if}
+  </Modal>
+
+<!-- ===== 垃圾清理 ===== -->
+{:else if tab === "cleanup"}
+  {#if !cleanReport}
+    <div class="center-cta">
+      <p class="muted">扫描临时文件、缓存、回收站，一键释放磁盘空间。</p>
+      <button class="primary" on:click={scanJunk} disabled={scanLoading}>{scanLoading ? "扫描中…" : "扫描垃圾"}</button>
+    </div>
+  {:else}
+    <div class="clean-bar">
+      <span class="clean-total">{fmtBytes(selectedBytes)}<span class="muted"> 可清理</span></span>
+      <div class="clean-actions">
+        <label class="rp-toggle"><input type="checkbox" bind:checked={createRpBeforeClean} />创建还原点</label>
+        <button class="ghost" on:click={scanJunk} disabled={scanLoading}>重新扫描</button>
+        <button class="primary" on:click={() => (cleanConfirm = true)} disabled={cleaning || selectedCats.size === 0}>
+          {cleaning ? "清理中…" : "一键优化"}
+        </button>
+      </div>
+    </div>
+    <div class="cats">
+      {#each cleanReport.categories as c (c.id)}
+        <label class="cat" class:off={!c.available || (c.needs_admin && !$elevated)}>
+          <input type="checkbox" checked={selectedCats.has(c.id)} disabled={!c.available || (c.needs_admin && !$elevated)} on:change={() => toggleCat(c.id)} />
+          <span class="cat-label">{c.label}{#if c.needs_admin && !$elevated}<span class="lock">&#128274;</span>{/if}</span>
+          <span class="cat-size">{fmtBytes(c.bytes)}</span>
+        </label>
+      {/each}
+    </div>
+    {#if cleanResult}<div class="clean-result">已释放 <b>{fmtBytes(cleanResult.freed_bytes)}</b></div>{/if}
+  {/if}
+  <Modal open={cleanConfirm} title="确认优化" on:close={() => (cleanConfirm = false)}>
+    <p>清理 {selectedCats.size} 个分类共 {fmtBytes(selectedBytes)}，同时释放内存。不可撤销。{createRpBeforeClean ? "已勾选还原点。" : ""}</p>
+    <div class="modal-actions"><button class="ghost" on:click={() => (cleanConfirm = false)}>取消</button><button class="primary" on:click={doClean}>确认</button></div>
+  </Modal>
+
+<!-- ===== 开机启动 ===== -->
+{:else if tab === "startup"}
   <div class="table-wrap">
     <table>
-      <thead>
-        <tr><th class="col-name">名称</th><th>位置</th><th class="col-cmd">命令</th><th class="col-sw">状态</th></tr>
-      </thead>
+      <thead><tr><th class="col-name">名称</th><th>位置</th><th class="col-cmd">命令</th><th class="col-sw">状态</th></tr></thead>
       <tbody>
         {#if startupLoading}
           <tr><td colspan="4" class="empty">加载中…</td></tr>
@@ -255,16 +331,14 @@
               <td class="col-cmd mono" title={item.command}>{item.command}</td>
               <td class="col-sw">
                 <button
-                  class="sw"
+                  class="toggle-switch"
                   class:on={item.enabled}
-                  class:pending={togglingId === item.id}
-                  on:click={() => requestToggle(item)}
-                  disabled={togglingId === item.id}
-                  role="switch"
-                  aria-checked={item.enabled}
-                  aria-label={(item.enabled ? "禁用 " : "启用 ") + item.name}
+                  class:pending={startupPending === item.id}
+                  on:click={() => confirmToggle(item)}
+                  aria-label={item.enabled ? '禁用' : '启用'}
+                  disabled={startupPending === item.id}
                 >
-                  <span class="sw-knob"></span>
+                  <span class="toggle-knob"></span>
                 </button>
               </td>
             </tr>
@@ -273,268 +347,154 @@
       </tbody>
     </table>
   </div>
+
+  <Modal open={!!startupToggleTarget} title={startupToggleTarget?.enabled ? '禁用启动项' : '启用启动项'} on:close={() => (startupToggleTarget = null)}>
+    {#if startupToggleTarget}
+      <p>
+        {startupToggleTarget.enabled ? '禁用' : '启用'}
+        <strong> {startupToggleTarget.name}</strong>
+        （{locLabel(startupToggleTarget.location)}）。
+        {startupToggleTarget.enabled ? '该程序将不再随系统自启。' : '该程序将随系统自启。'}
+      </p>
+      {#if startupToggleTarget.location.startsWith('HKLM')}
+        <p class="muted">此操作需要管理员权限。</p>
+      {/if}
+      <div class="modal-actions">
+        <button class="ghost" on:click={() => (startupToggleTarget = null)}>取消</button>
+        <button class="primary" on:click={doToggle}>确认{startupToggleTarget.enabled ? '禁用' : '启用'}</button>
+      </div>
+    {/if}
+  </Modal>
 {/if}
 
-<Modal open={confirmOpen} title="确认一键优化" on:close={() => (confirmOpen = false)}>
-  <p>将清理选中的 {selected.size} 个分类（约 {fmtBytes(selectedBytes)}），并裁剪进程工作集释放内存。</p>
-  <p class="muted">清理为删除操作、不可撤销；被占用的文件会自动跳过。</p>
-  <div class="modal-actions">
-    <button class="ghost" on:click={() => (confirmOpen = false)}>取消</button>
-    <button class="primary" on:click={runOptimize}>确认优化</button>
-  </div>
-</Modal>
-
-<Modal open={closeOpen} title="结束所选进程" on:close={() => (closeOpen = false)}>
-  <p>将结束选中的 {bgSelected.size} 个进程，未保存数据可能丢失。</p>
-  <div class="modal-actions">
-    <button class="ghost" on:click={() => (closeOpen = false)}>取消</button>
-    <button class="danger" on:click={closeSelectedBg}>确认结束</button>
-  </div>
-</Modal>
-
-<Modal
-  open={!!toggleTarget}
-  title={toggleTarget && toggleTarget.enabled ? "禁用启动项" : "启用启动项"}
-  on:close={() => (toggleTarget = null)}
->
-  {#if toggleTarget}
-    <p>
-      确定要{toggleTarget.enabled ? "禁用" : "启用"}
-      <strong>{toggleTarget.name}</strong> 的开机自启吗？
-    </p>
-    <p class="muted">
-      {toggleTarget.enabled
-        ? "禁用后该程序将不再随 Windows 启动（可随时重新启用）。"
-        : "启用后该程序将随 Windows 启动。"}
-    </p>
-    <div class="modal-actions">
-      <button class="ghost" on:click={() => (toggleTarget = null)}>取消</button>
-      <button class="primary" on:click={confirmToggle}>
-        确认{toggleTarget.enabled ? "禁用" : "启用"}
-      </button>
-    </div>
-  {/if}
-</Modal>
-
 <style>
-  .admin-banner {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-4);
-    flex-wrap: wrap;
-    padding: 10px 14px;
-    margin-bottom: var(--sp-4);
-    border: 1px solid rgba(245, 158, 11, 0.35);
-    background: rgba(245, 158, 11, 0.1);
-    border-radius: var(--radius-sm);
-    font-size: 13px;
-    color: #fcd34d;
-  }
-  .tabs {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-1);
-    margin-bottom: var(--sp-4);
-    border-bottom: 1px solid var(--border);
-  }
-  .tab {
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-family: inherit;
-    font-size: 14px;
-    font-weight: 500;
-    padding: 10px 16px;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-  }
+  .admin-banner { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; padding: 10px 14px; margin-bottom: var(--sp-4); border: 1px solid rgba(245,158,11,0.35); background: rgba(245,158,11,0.1); border-radius: var(--radius-sm); font-size: 13px; color: #fcd34d; }
+  .elevate-btn { font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm); border: 1px solid rgba(245,158,11,0.45); background: rgba(245,158,11,0.1); color: var(--warn); font-family: inherit; cursor: pointer; }
+  .elevate-btn:hover { background: rgba(245,158,11,0.18); }
+
+  .tabs { display: flex; gap: 0; margin-bottom: var(--sp-4); border-bottom: 1px solid var(--border); }
+  .tab { border: none; background: transparent; color: var(--text-muted); font-family: inherit; font-size: 14px; padding: 10px 18px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; display: flex; align-items: center; gap: 6px; }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); }
-  .tab-badge {
-    font-size: 11px;
-    color: var(--text-muted);
-    background: var(--surface-2);
-    padding: 1px 7px;
-    border-radius: 999px;
-    font-variant-numeric: tabular-nums;
-  }
+  .tab-badge { font-size: 11px; color: var(--text-muted); background: var(--surface-2); padding: 1px 7px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 
-  .scan-intro {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--sp-4);
-    padding: var(--sp-6);
-    text-align: center;
-  }
-  .summary {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--sp-4);
-    padding: var(--sp-4) var(--sp-6);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--surface);
-    margin-bottom: var(--sp-4);
-  }
-  .gauge-num { font-size: 32px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .gauge-label { font-size: 12px; }
-  .summary-actions { display: flex; gap: var(--sp-2); }
+  .center-cta { display: flex; flex-direction: column; align-items: center; gap: var(--sp-4); padding: var(--sp-8); text-align: center; }
+  .muted { color: var(--text-muted); font-size: 13px; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
-  .cats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: var(--sp-2);
-  }
-  .cat {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    padding: 10px 14px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .cat.off { opacity: 0.5; cursor: default; }
+  /* 加速中心：一键加速主卡 */
+  .boost-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: var(--sp-6); margin-bottom: var(--sp-4); }
+  .boost-head { display: flex; justify-content: space-between; align-items: flex-start; }
+  .boost-title { margin: 0; font-size: 16px; font-weight: 600; }
+  .boost-sub { margin: 4px 0 0; font-size: 13px; color: var(--text-muted); }
+  .boost-metrics { display: flex; gap: var(--sp-8); margin: var(--sp-4) 0; }
+  .bm { display: flex; align-items: center; gap: var(--sp-3); }
+  .bm-bar { width: 4px; height: 40px; border-radius: 999px; background: var(--surface-2); overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+  .bm-fill { width: 100%; border-radius: 999px; transition: height 0.4s ease; }
+  .bm-fill.ok { background: var(--accent); }
+  .bm-fill.warn { background: var(--warn); }
+  .bm-fill.danger { background: var(--danger); }
+  .bm-text { display: flex; flex-direction: column; }
+  .bm-num { font-size: 20px; font-weight: 700; line-height: 1.1; }
+  .bm-label { font-size: 12px; color: var(--text-muted); }
+  .boost-btn { width: 100%; border: none; background: linear-gradient(135deg, var(--accent), #7c3aed); color: #fff; font-family: inherit; font-size: 15px; font-weight: 600; padding: 12px; border-radius: var(--radius-sm); cursor: pointer; transition: opacity 0.15s ease; }
+  .boost-btn:hover { opacity: 0.92; }
+  .boost-btn:disabled { opacity: 0.6; cursor: default; }
+  .boost-btn.done { background: rgba(34, 197, 94, 0.16); color: var(--ok); border: 1px solid rgba(34, 197, 94, 0.4); }
+  .boost-result { margin: var(--sp-3) 0 0; font-size: 13px; color: var(--text-muted); text-align: center; }
+  .boost-result b { color: var(--text); }
+
+  /* 加速中心：功能宫格 */
+  .entry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); }
+  .entry { text-align: left; display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-family: inherit; cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
+  .entry:hover { border-color: var(--accent); background: var(--surface-2); }
+  .entry-head { display: flex; align-items: center; }
+  .entry-name { font-size: 14px; font-weight: 500; }
+  .entry-info { display: flex; align-items: baseline; gap: 6px; }
+  .entry-strong { font-size: 18px; font-weight: 700; }
+  .entry-strong.ok { color: var(--ok); }
+  .entry-strong.warn { color: var(--warn); }
+  .entry-strong.danger { color: var(--danger); }
+  .entry-unit { font-size: 12px; color: var(--text-muted); }
+  .entry-hint { font-size: 13px; color: var(--text-muted); }
+
+  /* 体检 */
+  .health-top { display: flex; align-items: center; gap: var(--sp-6); margin-bottom: var(--sp-4); }
+  .health-score { width: 64px; height: 64px; border-radius: 999px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 3px solid; font-size: 22px; font-weight: 700; font-family: var(--font-mono); flex-shrink: 0; }
+  .health-score span { font-size: 10px; font-weight: 400; }
+  .health-score.ok { border-color: var(--ok); color: var(--ok); }
+  .health-score.warn { border-color: var(--warn); color: var(--warn); }
+  .health-score.danger { border-color: var(--danger); color: var(--danger); }
+  .health-meta { display: flex; flex-direction: column; gap: 4px; font-size: 13px; flex: 1; }
+  .health-actions { display: flex; flex-direction: column; gap: var(--sp-2); flex-shrink: 0; }
+  .issue-list { margin-bottom: var(--sp-4); }
+  .issue-row { padding: var(--sp-2) 0; font-size: 13px; display: flex; gap: var(--sp-3); border-bottom: 1px solid var(--border); }
+  .issue-row:last-child { border-bottom: none; }
+  .issue-detail { color: var(--text-muted); font-size: 12px; }
+  .health-tips { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); background: var(--surface); }
+  .tip { font-size: 13px; color: var(--text-muted); padding: 2px 0 2px 14px; position: relative; }
+  .tip::before { content: ""; position: absolute; left: 0; top: 9px; width: 5px; height: 5px; border-radius: 999px; background: var(--accent); }
+  .opt-list { margin: var(--sp-2) 0; padding-left: 18px; font-size: 13px; color: var(--text); line-height: 1.7; }
+
+  /* 清理 */
+  .clean-bar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: var(--sp-4); }
+  .clean-total { font-size: 22px; font-weight: 700; font-family: var(--font-mono); }
+  .clean-actions { display: flex; align-items: center; gap: var(--sp-3); }
+  .rp-toggle { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+  .cats { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--sp-2); }
+  .cat { display: flex; align-items: center; gap: var(--sp-2); padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); cursor: pointer; font-size: 13px; }
+  .cat.off { opacity: 0.45; cursor: default; }
   .cat input { accent-color: var(--accent); }
   .cat-label { flex: 1; }
-  .cat-size { color: var(--text-muted); }
-  .lock { margin-left: 4px; }
+  .cat-size { color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; }
+  .lock { font-size: 11px; }
+  .clean-result { margin-top: var(--sp-3); padding: var(--sp-3); font-size: 14px; }
 
-  .result {
-    display: flex;
-    gap: var(--sp-6);
-    margin: var(--sp-4) 0;
-    padding: var(--sp-4);
-    border: 1px solid rgba(34, 197, 94, 0.35);
-    background: rgba(34, 197, 94, 0.08);
-    border-radius: var(--radius);
-  }
-  .res-item { display: flex; flex-direction: column; gap: 2px; }
-  .res-item b { font-size: 20px; }
-
-  .bg { margin-top: var(--sp-4); }
-  .bg-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--sp-2); }
-  .bg-head h3 { margin: 0; font-size: 14px; }
-  .bg-list { display: flex; flex-direction: column; gap: 6px; }
-  .bg-item {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    padding: 8px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .bg-item input { accent-color: var(--accent); }
-  .bg-name { flex: 1; font-weight: 500; }
-  .bg-mem { color: var(--text-muted); }
-
-  .table-wrap {
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    background: var(--surface);
-  }
+  /* 表 */
+  .table-wrap { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  thead th {
-    position: sticky;
-    top: 0;
-    background: var(--surface-2);
-    text-align: left;
-    padding: 10px 14px;
-    font-weight: 500;
-    color: var(--text-muted);
-    white-space: nowrap;
-  }
-  tbody { display: block; max-height: calc(100vh - 230px); overflow-y: auto; }
+  thead th { position: sticky; top: 0; background: var(--surface-2); text-align: left; padding: 10px 14px; font-weight: 500; color: var(--text-muted); white-space: nowrap; }
+  tbody { display: block; max-height: calc(100vh - 260px); overflow-y: auto; }
   thead, tbody tr { display: table; width: 100%; table-layout: fixed; }
   td { padding: 8px 14px; border-top: 1px solid var(--border); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   tbody tr:hover { background: var(--surface-2); }
-  .col-sw { width: 110px; text-align: right; }
+  .col-name { width: auto; }
+  .col-cmd { max-width: 0; }
+  .col-sw { width: 64px; text-align: center; }
   .empty { text-align: center; color: var(--text-muted); padding: 40px; }
 
-  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-  .muted { color: var(--text-muted); }
-
-  .primary {
-    border: none;
-    background: linear-gradient(135deg, var(--accent), #7c3aed);
-    color: #fff;
-    font-family: inherit;
-    font-size: 13px;
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-  .primary.big { font-size: 15px; padding: 12px 28px; }
-  .primary:disabled { opacity: 0.6; cursor: default; }
-  .ghost {
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text);
-    font-family: inherit;
-    font-size: 13px;
-    padding: 8px 16px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-  .ghost:hover { background: var(--surface-2); }
-  .danger {
-    border: 1px solid rgba(239, 68, 68, 0.4);
-    background: transparent;
-    color: var(--danger);
-    font-family: inherit;
-    font-size: 12px;
-    padding: 6px 12px;
-    border-radius: 8px;
-    cursor: pointer;
-  }
-  .danger:hover { background: rgba(239, 68, 68, 0.12); }
-  .danger:disabled { opacity: 0.5; cursor: default; }
-  .sw {
+  /* Toggle 开关（原始设计） */
+  .toggle-switch {
     position: relative;
     width: 44px;
     height: 24px;
-    padding: 0;
-    border: 1px solid var(--border);
     border-radius: 999px;
+    border: none;
     background: var(--surface-2);
     cursor: pointer;
-    vertical-align: middle;
-    transition: background 0.25s ease, border-color 0.25s ease;
+    padding: 0;
+    transition: background 0.25s ease;
   }
-  .sw-knob {
+  .toggle-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .toggle-switch.on { background: rgba(99, 102, 241, 0.9); }
+  .toggle-knob {
     position: absolute;
     top: 2px;
     left: 2px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--text-muted);
-    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.25s ease;
+    width: 20px;
+    height: 20px;
+    border-radius: 999px;
+    background: var(--text);
+    transition: transform 0.25s ease;
   }
-  .sw.on {
-    background: rgba(34, 197, 94, 0.25);
-    border-color: rgba(34, 197, 94, 0.5);
-  }
-  .sw.on .sw-knob {
-    transform: translateX(20px);
-    background: var(--ok);
-  }
-  .sw:hover { border-color: var(--accent); }
-  .sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .sw.pending { opacity: 0.55; cursor: default; }
-  .sw.pending .sw-knob { animation: sw-pulse 0.8s ease-in-out infinite; }
-  @keyframes sw-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.35; }
-  }
+  .toggle-switch.on .toggle-knob { transform: translateX(20px); }
+  .toggle-switch.pending { opacity: 0.6; }
+  .toggle-switch.pending .toggle-knob { animation: pulse 0.6s ease-in-out infinite alternate; }
+  @keyframes pulse { from { transform: scale(1); } to { transform: scale(0.85); } }
+
+  .primary { border: none; background: linear-gradient(135deg, var(--accent), #7c3aed); color: #fff; font-family: inherit; font-size: 13px; padding: 8px 16px; border-radius: var(--radius-sm); cursor: pointer; }
+  .primary:disabled { opacity: 0.6; cursor: default; }
+  .ghost { border: 1px solid var(--border); background: transparent; color: var(--text); font-family: inherit; font-size: 13px; padding: 7px 14px; border-radius: var(--radius-sm); cursor: pointer; }
+  .ghost:hover { background: var(--surface-2); }
   .modal-actions { display: flex; justify-content: flex-end; gap: var(--sp-2); margin-top: var(--sp-3); }
 </style>

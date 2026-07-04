@@ -1,0 +1,1 @@
+ETW 会话启动失败（多半未提权）：EtwNativeError(IoError(Os { code: -2147024891, kind: Uncategorized, message: "拒绝访问。" }))

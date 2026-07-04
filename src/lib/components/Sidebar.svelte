@@ -11,6 +11,7 @@
     { id: "network", label: "网络与端口", icon: "network" },
     { id: "disk", label: "磁盘管理", icon: "harddrive" },
     { id: "toolbox", label: "优化加速", icon: "terminal" },
+    { id: "tools", label: "系统工具", icon: "wrench" },
     { id: "ai", label: "AI 助手", icon: "sparkles" },
     { id: "about", label: "关于", icon: "info" },
   ];

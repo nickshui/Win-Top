@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { startMetrics, startEvents, startNetTraffic } from "./lib/stores.js";
+  import { startMetrics, startEvents, startNetTraffic, startCleanupNotifications, startDiskIo } from "./lib/stores.js";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import Overview from "./lib/views/Overview.svelte";
@@ -11,22 +11,29 @@
   import About from "./lib/views/About.svelte";
   import Placeholder from "./lib/views/Placeholder.svelte";
   import Optimize from "./lib/views/Optimize.svelte";
+  import Tools from "./lib/views/Tools.svelte";
   import Toast from "./lib/components/Toast.svelte";
 
   let current = "overview";
   let stopMetrics;
   let stopEvents;
   let stopNetTraffic;
+  let stopCleanupNotif;
+  let stopDiskIo;
 
   onMount(() => {
     stopMetrics = startMetrics();
     stopEvents = startEvents();
     stopNetTraffic = startNetTraffic();
+    stopCleanupNotif = startCleanupNotifications();
+    stopDiskIo = startDiskIo();
   });
   onDestroy(() => {
     if (stopMetrics) stopMetrics();
     if (stopEvents) stopEvents();
     if (stopNetTraffic) stopNetTraffic();
+    if (stopCleanupNotif) stopCleanupNotif();
+    if (stopDiskIo) stopDiskIo();
   });
 
   const meta = {
@@ -52,6 +59,7 @@
       icon: "terminal",
       plan: "命令卡片参数化，长任务异步流式输出，需管理员的操作走按需提权。",
     },
+    tools: { title: "系统工具", icon: "wrench" },
     ai: {
       title: "AI 助手",
       icon: "sparkles",
@@ -77,7 +85,9 @@
       {:else if current === "disk"}
         <Disk />
       {:else if current === "toolbox"}
-        <Optimize />
+        <Optimize navigate={(id) => (current = id)} />
+      {:else if current === "tools"}
+        <Tools />
       {:else if current === "about"}
         <About />
       {:else}

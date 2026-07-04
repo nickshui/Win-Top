@@ -1,6 +1,7 @@
 //! 垃圾清理：扫描各分类体积、按选择清理。逐文件容错，只在固定根目录内操作，不跟符号链接。
 
 use std::fs;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -180,6 +181,11 @@ fn defs() -> Vec<CatDef> {
         CatDef { id: "prefetch", label: "Prefetch", needs_admin: true, kind: Kind::Dirs },
         CatDef { id: "edge_cache", label: "Edge 缓存", needs_admin: false, kind: Kind::Dirs },
         CatDef { id: "chrome_cache", label: "Chrome 缓存", needs_admin: false, kind: Kind::Dirs },
+        CatDef { id: "inet_cache", label: "IE/Edge 临时缓存", needs_admin: false, kind: Kind::Dirs },
+        CatDef { id: "recent_docs", label: "最近文档记录", needs_admin: false, kind: Kind::Dirs },
+        CatDef { id: "dns_cache", label: "DNS 缓存", needs_admin: true, kind: Kind::Dirs },
+        CatDef { id: "fonts_cache", label: "字体缓存", needs_admin: false, kind: Kind::Dirs },
+        CatDef { id: "delivery_opt", label: "传递优化文件", needs_admin: true, kind: Kind::Dirs },
     ]
 }
 
@@ -237,6 +243,36 @@ fn dirs_for(id: &str) -> Vec<PathBuf> {
         "prefetch" => vec![windir().join("Prefetch")],
         "edge_cache" => browser_cache_dirs("Microsoft\\Edge\\User Data"),
         "chrome_cache" => browser_cache_dirs("Google\\Chrome\\User Data"),
+        "inet_cache" => {
+            let mut v = Vec::new();
+            if let Some(la) = local_appdata() {
+                v.push(la.join("Microsoft\\Windows\\INetCache"));
+                v.push(la.join("Microsoft\\Windows\\INetCookies"));
+                v.push(la.join("Microsoft\\Windows\\IECompatCache"));
+                v.push(la.join("Microsoft\\Windows\\IECompatUaCache"));
+            }
+            v
+        }
+        "recent_docs" => {
+            let mut v = Vec::new();
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                let ad = &appdata;
+                v.push(PathBuf::from(ad).join("Microsoft\\Windows\\Recent"));
+                v.push(PathBuf::from(ad).join("Microsoft\\Windows\\Recent\\AutomaticDestinations"));
+                v.push(PathBuf::from(ad).join("Microsoft\\Windows\\Recent\\CustomDestinations"));
+            }
+            v
+        }
+        "dns_cache" => vec![],
+        "fonts_cache" => {
+            let mut v = Vec::new();
+            if let Some(la) = local_appdata() {
+                v.push(la.join("Microsoft\\Windows\\Fonts"));
+            }
+            v.push(windir().join("ServiceProfiles\\LocalService\\AppData\\Local\\FontCache"));
+            v
+        }
+        "delivery_opt" => vec![windir().join("SoftwareDistribution\\DeliveryOptimization")],
         _ => Vec::new(),
     }
 }
@@ -271,34 +307,38 @@ pub fn scan_junk() -> CleanupReport {
     let mut cats = Vec::new();
     let mut total = 0u64;
     for d in defs() {
-        let (bytes, files, available) = match &d.kind {
-            Kind::RecycleBin => {
-                let (b, n) = recycle_query();
-                (b, n, true)
-            }
-            Kind::Glob(pref) => {
-                let dirs = dirs_for(d.id);
-                let avail = dirs.iter().any(|p| p.exists());
-                let mut b = 0u64;
-                let mut f = 0u64;
-                for dir in &dirs {
-                    let (bb, ff) = glob_stats(dir, pref);
-                    b += bb;
-                    f += ff;
+        let (bytes, files, available) = if d.id == "dns_cache" {
+            (0, 0, true) // DNS 缓存大小无法直接测量
+        } else {
+            match &d.kind {
+                Kind::RecycleBin => {
+                    let (b, n) = recycle_query();
+                    (b, n, true)
                 }
-                (b, f, avail)
-            }
-            Kind::Dirs => {
-                let dirs = dirs_for(d.id);
-                let avail = dirs.iter().any(|p| p.exists());
-                let mut b = 0u64;
-                let mut f = 0u64;
-                for dir in &dirs {
-                    let (bb, ff) = dir_stats(dir);
-                    b += bb;
-                    f += ff;
+                Kind::Glob(pref) => {
+                    let dirs = dirs_for(d.id);
+                    let avail = dirs.iter().any(|p| p.exists());
+                    let mut b = 0u64;
+                    let mut f = 0u64;
+                    for dir in &dirs {
+                        let (bb, ff) = glob_stats(dir, pref);
+                        b += bb;
+                        f += ff;
+                    }
+                    (b, f, avail)
                 }
-                (b, f, avail)
+                Kind::Dirs => {
+                    let dirs = dirs_for(d.id);
+                    let avail = dirs.iter().any(|p| p.exists());
+                    let mut b = 0u64;
+                    let mut f = 0u64;
+                    for dir in &dirs {
+                        let (bb, ff) = dir_stats(dir);
+                        b += bb;
+                        f += ff;
+                    }
+                    (b, f, avail)
+                }
             }
         };
         total += bytes;
@@ -321,27 +361,39 @@ pub fn clean_junk(ids: Vec<String>) -> CleanupResult {
         if !ids.iter().any(|x| x == d.id) {
             continue;
         }
-        let (freed, skipped) = match &d.kind {
-            Kind::RecycleBin => recycle_empty(),
-            Kind::Glob(pref) => {
-                let mut fr = 0u64;
-                let mut sk = 0u64;
-                for dir in dirs_for(d.id) {
-                    let (a, b) = glob_clean(&dir, pref);
-                    fr += a;
-                    sk += b;
-                }
-                (fr, sk)
+        let (freed, skipped) = if d.id == "dns_cache" {
+            // DNS 缓存：通过 ipconfig /flushdns 清除，无法度量释放空间
+            let output = std::process::Command::new("ipconfig")
+                .creation_flags(0x08000000_u32)
+                .args(["/flushdns"])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => (0, 0),
+                _ => (0, 1),
             }
-            Kind::Dirs => {
-                let mut fr = 0u64;
-                let mut sk = 0u64;
-                for dir in dirs_for(d.id) {
-                    let (a, b) = clean_dir_contents(&dir);
-                    fr += a;
-                    sk += b;
+        } else {
+            match &d.kind {
+                Kind::RecycleBin => recycle_empty(),
+                Kind::Glob(pref) => {
+                    let mut fr = 0u64;
+                    let mut sk = 0u64;
+                    for dir in dirs_for(d.id) {
+                        let (a, b) = glob_clean(&dir, pref);
+                        fr += a;
+                        sk += b;
+                    }
+                    (fr, sk)
                 }
-                (fr, sk)
+                Kind::Dirs => {
+                    let mut fr = 0u64;
+                    let mut sk = 0u64;
+                    for dir in dirs_for(d.id) {
+                        let (a, b) = clean_dir_contents(&dir);
+                        fr += a;
+                        sk += b;
+                    }
+                    (fr, sk)
+                }
             }
         };
         total_freed += freed;

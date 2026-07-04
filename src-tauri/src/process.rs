@@ -7,23 +7,27 @@ use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use windows::Wdk::System::SystemInformation::{NtQuerySystemInformation, SystemProcessInformation};
 use windows::Win32::Foundation::{CloseHandle, BOOL};
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows::Win32::System::Threading::{
-    OpenProcess, SetPriorityClass, TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS,
-    BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    PROCESS_CREATION_FLAGS, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, REALTIME_PRIORITY_CLASS,
+    GetPriorityClass, GetProcessHandleCount, OpenProcess, SetPriorityClass, TerminateProcess,
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS,
+    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
+    PROCESS_QUERY_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_TERMINATE, REALTIME_PRIORITY_CLASS,
 };
 use windows::Win32::System::WindowsProgramming::SYSTEM_PROCESS_INFORMATION;
+
+use wmi::{COMLibrary, WMIConnection};
 
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
 
 #[derive(Serialize)]
 pub struct ProcessRow {
     pub pid: u32,
+    pub parent_pid: u32,
     pub name: String,
     pub cpu: f64,
     pub mem_mb: f64,
@@ -54,9 +58,10 @@ static NCPU: LazyLock<f64> = LazyLock::new(|| unsafe {
     (si.dwNumberOfProcessors.max(1)) as f64
 });
 
-/// 原始进程项（pid, 名称, 内核+用户时间(100ns), 工作集字节, 线程数）
+/// 原始进程项（pid, 父pid, 名称, 内核+用户时间(100ns), 工作集字节, 线程数）
 struct RawProc {
     pid: u32,
+    parent_pid: u32,
     name: String,
     total_time: i64,
     ws: u64,
@@ -93,6 +98,11 @@ unsafe fn query_processes() -> Result<Vec<RawProc>, String> {
         let info = &*p;
 
         let pid = info.UniqueProcessId.0 as u32;
+        // InheritedFromUniqueProcessId 紧跟在 UniqueProcessId 之后（HANDLE=8 字节）
+        let parent_pid = {
+            let upid: *const windows::Win32::Foundation::HANDLE = &info.UniqueProcessId;
+            unsafe { (*upid.add(1)).0 as u32 }
+        };
         let name = if info.ImageName.Buffer.0.is_null() {
             if pid == 0 {
                 "System Idle Process".to_string()
@@ -114,6 +124,7 @@ unsafe fn query_processes() -> Result<Vec<RawProc>, String> {
 
         out.push(RawProc {
             pid,
+            parent_pid,
             name,
             total_time: user_time + kernel_time,
             ws: info.WorkingSetSize as u64,
@@ -146,6 +157,15 @@ pub fn pid_name_map() -> HashMap<u32, String> {
     }
 }
 
+/// 返回当前所有进程的 PID 列表（轻量，不含 CPU 跟踪开销）。
+pub fn list_pids() -> Vec<u32> {
+    unsafe {
+        query_processes()
+            .map(|v| v.into_iter().map(|p| p.pid).collect())
+            .unwrap_or_default()
+    }
+}
+
 pub fn list_processes() -> Result<Vec<ProcessRow>, String> {
     let snapshot = unsafe { query_processes()? };
     let now = Instant::now();
@@ -174,6 +194,7 @@ pub fn list_processes() -> Result<Vec<ProcessRow>, String> {
         new_prev.insert(rp.pid, rp.total_time);
         rows.push(ProcessRow {
             pid: rp.pid,
+            parent_pid: rp.parent_pid,
             name: if rp.name.is_empty() {
                 format!("PID {}", rp.pid)
             } else {
@@ -268,4 +289,125 @@ pub fn set_priority(pid: u32, level: &str) -> ActionResult {
             },
         }
     }
+}
+
+// ===== 进程详情（P1.4） =====
+
+#[derive(Serialize)]
+pub struct ProcessDetail {
+    pub pid: u32,
+    pub name: String,
+    pub command_line: String,
+    pub full_path: String,
+    pub parent_pid: u32,
+    pub cpu: f64,
+    pub mem_mb: f64,
+    pub threads: u32,
+    pub handles: u32,
+    pub priority: String,
+}
+
+unsafe fn get_handle_count(pid: u32) -> u32 {
+    let handle = match OpenProcess(PROCESS_QUERY_INFORMATION, BOOL(0), pid) {
+        Ok(h) => h,
+        Err(_) => return 0,
+    };
+    let mut count: u32 = 0;
+    let ok = GetProcessHandleCount(handle, &mut count);
+    let _ = CloseHandle(handle);
+    if ok.is_ok() { count } else { 0 }
+}
+
+unsafe fn get_priority_label(pid: u32) -> String {
+    let handle = match OpenProcess(PROCESS_QUERY_INFORMATION, BOOL(0), pid) {
+        Ok(h) => h,
+        Err(_) => return "未知".to_string(),
+    };
+    let pc = GetPriorityClass(handle);
+    let _ = CloseHandle(handle);
+    if pc == IDLE_PRIORITY_CLASS.0 {
+        "低".to_string()
+    } else if pc == BELOW_NORMAL_PRIORITY_CLASS.0 {
+        "低于普通".to_string()
+    } else if pc == NORMAL_PRIORITY_CLASS.0 {
+        "普通".to_string()
+    } else if pc == ABOVE_NORMAL_PRIORITY_CLASS.0 {
+        "高于普通".to_string()
+    } else if pc == HIGH_PRIORITY_CLASS.0 {
+        "高".to_string()
+    } else if pc == REALTIME_PRIORITY_CLASS.0 {
+        "实时".to_string()
+    } else {
+        "未知".to_string()
+    }
+}
+
+fn wmi_detail(pid: u32) -> (String, String) {
+    // WMI 初始化需独立线程（避免与 Tauri STA 套间冲突）
+    let handle = std::thread::spawn(move || -> Result<(String, String), String> {
+        let com = COMLibrary::new().map_err(|e| e.to_string())?;
+        let con = WMIConnection::new(com).map_err(|e| e.to_string())?;
+
+        #[derive(Deserialize)]
+        #[serde(rename = "Win32_Process")]
+        #[serde(rename_all = "PascalCase")]
+        struct Win32Process {
+            command_line: Option<String>,
+            executable_path: Option<String>,
+        }
+
+        let results: Vec<Win32Process> = con
+            .raw_query(&format!(
+                "SELECT CommandLine, ExecutablePath FROM Win32_Process WHERE ProcessId = {}",
+                pid
+            ))
+            .map_err(|e| e.to_string())?;
+
+        match results.into_iter().next() {
+            Some(p) => Ok((
+                p.command_line.unwrap_or_default(),
+                p.executable_path.unwrap_or_default(),
+            )),
+            None => Ok((String::new(), String::new())),
+        }
+    });
+
+    match handle.join() {
+        Ok(Ok((cmd, path))) => (cmd, path),
+        _ => (String::new(), String::new()),
+    }
+}
+
+/// 获取单个进程的详细信息（供详情面板使用）。
+pub fn get_process_detail(pid: u32) -> Result<ProcessDetail, String> {
+    let procs = unsafe { query_processes()? };
+    let proc = procs
+        .iter()
+        .find(|p| p.pid == pid)
+        .ok_or_else(|| format!("进程 PID {} 未找到", pid))?;
+
+    // CPU 从 list_processes 获取（含差分计算）
+    let rows = list_processes()?;
+    let cpu = rows.iter().find(|r| r.pid == pid).map(|r| r.cpu).unwrap_or(0.0);
+
+    let handles = unsafe { get_handle_count(pid) };
+    let priority = unsafe { get_priority_label(pid) };
+    let (command_line, full_path) = wmi_detail(pid);
+
+    Ok(ProcessDetail {
+        pid,
+        name: if proc.name.is_empty() {
+            format!("PID {}", pid)
+        } else {
+            proc.name.clone()
+        },
+        command_line,
+        full_path,
+        parent_pid: proc.parent_pid,
+        cpu,
+        mem_mb: proc.ws as f64 / 1024.0 / 1024.0,
+        threads: proc.threads,
+        handles,
+        priority,
+    })
 }
