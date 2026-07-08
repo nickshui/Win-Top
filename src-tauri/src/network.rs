@@ -350,7 +350,7 @@ pub fn speed_test() -> SpeedResult {
     use std::io::Read;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let fail = |msg: String| SpeedResult {
         down_mbps: 0.0,
@@ -360,25 +360,29 @@ pub fn speed_test() -> SpeedResult {
         error: Some(msg),
     };
 
-    let client = match reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(3)) // 失败源 3s 内放弃，不拖累整体
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => Arc::new(c),
-        Err(e) => return fail(e.to_string()),
+    // 每流独立 Client（禁用 HTTP/2、连接池空闲连接置 0）→ N 个流 = N 条真实 TCP 连接，
+    // 避免 h2 多路复用把多流合并回单连接、受单连接拥塞窗口限制而测不满带宽。
+    let build_client = || {
+        reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(30))
+            .http1_only()
+            .pool_max_idle_per_host(0)
+            .build()
     };
 
-    // 多个「不同主机」的源各开多个流同时下载，聚合吞吐以逼近线路带宽
-    // （突破单镜像对单客户端的限速）。不可达/404 的源被快速跳过、贡献 0。
+    // 主力源：Cloudflare speed 端点，全球 Anycast 就近、公开无鉴权、基本不限速，
+    // 最能反映真实线路带宽。bytes 参数请求大对象以持续下载。
+    // 补充源：国内镜像大文件作兜底，防止 Cloudflare 偶发不可达时无数据。
+    let cf = "https://speed.cloudflare.com/__down?bytes=1000000000";
     let sources = [
-        "https://npmmirror.com/mirrors/electron/28.0.0/electron-v28.0.0-win32-x64.zip",
+        cf,
+        cf,
+        cf,
         "https://mirrors.aliyun.com/ubuntu-releases/22.04/ubuntu-22.04.5-desktop-amd64.iso",
         "https://mirrors.cloud.tencent.com/nodejs-release/v20.11.0/node-v20.11.0-x64.msi",
-        "https://mirrors.tuna.tsinghua.edu.cn/anaconda/archive/Anaconda3-2024.02-1-Windows-x86_64.exe",
-        "https://cachefly.cachefly.net/100mb.test",
     ];
-    let streams_per_source = 3;
+    let streams_per_source = 4;
 
     let total = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
@@ -386,15 +390,18 @@ pub fn speed_test() -> SpeedResult {
 
     for url in sources {
         for _ in 0..streams_per_source {
-            let c = Arc::clone(&client);
             let u = url.to_string();
             let t = Arc::clone(&total);
             let s = Arc::clone(&stop);
             handles.push(std::thread::spawn(move || {
+                let client = match build_client() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
                 let mut buf = [0u8; 65536];
                 // 持续下载直到主线程置停；文件下完立即重新请求，保持并行度
                 while !s.load(Ordering::Relaxed) {
-                    match c.get(&u).send() {
+                    match client.get(&u).send() {
                         Ok(mut resp) => {
                             if !resp.status().is_success() {
                                 break;
@@ -420,19 +427,63 @@ pub fn speed_test() -> SpeedResult {
     }
     let stream_count = handles.len();
 
-    // 预热 2s 摊薄 TCP 慢启动，再用 8s 稳态窗口计算速率（不受 join 超时影响 → 更准）
-    std::thread::sleep(Duration::from_secs(2));
-    let b0 = total.load(Ordering::Relaxed);
-    let window = Duration::from_secs(8);
-    std::thread::sleep(window);
-    let b1 = total.load(Ordering::Relaxed);
+    // 自适应窗口：先等速率爬升到稳定（相邻采样斜率收敛）再开始计窗，
+    // 摊薄 TCP 慢启动；随后测量直到速率方差收敛或达到最长时限 → 高带宽下也测得准。
+    let sample = || total.load(Ordering::Relaxed);
+    let tick = Duration::from_millis(500);
+
+    // 阶段一：预热直到速率稳定（最多 6s）。以每 tick 增量近似瞬时速率，
+    // 连续两次相对变化 < 12% 视为进入稳态。
+    let warmup_deadline = Instant::now() + Duration::from_secs(6);
+    let mut prev = sample();
+    let mut prev_rate = 0.0f64;
+    while Instant::now() < warmup_deadline {
+        std::thread::sleep(tick);
+        let now = sample();
+        let rate = (now - prev) as f64 / tick.as_secs_f64();
+        prev = now;
+        if prev_rate > 0.0 {
+            let delta = (rate - prev_rate).abs() / prev_rate.max(1.0);
+            if delta < 0.12 {
+                break; // 速率趋稳，结束预热
+            }
+        }
+        prev_rate = rate;
+    }
+
+    // 阶段二：稳态测量窗口。最短 6s、最长 14s；每秒计算窗口内平均速率，
+    // 当最近速率相对整窗均值的偏差 < 8% 时判定收敛、提前结束。
+    let b0 = sample();
+    let win_start = Instant::now();
+    let min_win = Duration::from_secs(6);
+    let max_win = Duration::from_secs(14);
+    let mut last_avg = 0.0f64;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let elapsed = win_start.elapsed();
+        let cur = sample();
+        let avg = (cur - b0) as f64 / elapsed.as_secs_f64();
+        if elapsed >= min_win {
+            if elapsed >= max_win {
+                break;
+            }
+            if last_avg > 0.0 {
+                let drift = (avg - last_avg).abs() / last_avg.max(1.0);
+                if drift < 0.08 {
+                    break; // 平均速率收敛
+                }
+            }
+        }
+        last_avg = avg;
+    }
+    let b1 = sample();
+    let secs = win_start.elapsed().as_secs_f64();
     stop.store(true, Ordering::Relaxed);
     for h in handles {
         let _ = h.join();
     }
 
     let bytes = b1.saturating_sub(b0);
-    let secs = window.as_secs_f64();
     if bytes < 1_000_000 {
         return fail("测速失败：未下载到足够数据".to_string());
     }
