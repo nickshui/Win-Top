@@ -5,6 +5,29 @@
   const PROJECT_URL = "https://github.com/nickshui/Win-Top";
   const VERSION = "0.1.0";
 
+  const recommendations = [
+    {
+      name: "JitWord",
+      tagline: "多人实时协同在线 AI Word",
+      url: "https://next.jitword.com",
+      icon: "📝",
+    },
+    {
+      name: "AiKnow",
+      tagline: "可自定义配置 AI 智能体的知识库",
+      url: "https://aiknow.jitword.com/",
+      icon: "📚",
+    },
+  ];
+
+  async function openUrl(url) {
+    try {
+      await open(url);
+    } catch (e) {
+      window.open(url, "_blank");
+    }
+  }
+
   async function openProject() {
     try {
       await open(PROJECT_URL);
@@ -55,6 +78,22 @@
     <Icon name="github" size={16} />
     访问项目主页
   </button>
+
+  <section class="recommend">
+    <h3 class="rec-title">推荐产品</h3>
+    <div class="rec-grid">
+      {#each recommendations as r}
+        <button class="rec-card" on:click={() => openUrl(r.url)}>
+          <span class="rec-icon">{r.icon}</span>
+          <span class="rec-info">
+            <span class="rec-name">{r.name}</span>
+            <span class="rec-tagline">{r.tagline}</span>
+            <span class="rec-url">{r.url}</span>
+          </span>
+        </button>
+      {/each}
+    </div>
+  </section>
 
   <p class="copyright">© 2026 nickshui · Win-Top</p>
 </div>
@@ -159,6 +198,68 @@
   }
   .primary:hover {
     filter: brightness(1.08);
+  }
+  .recommend {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+  .rec-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .rec-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: var(--sp-3);
+  }
+  .rec-card {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    text-align: left;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--sp-4);
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  }
+  .rec-card:hover {
+    border-color: var(--accent);
+    background: rgba(99, 102, 241, 0.08);
+    transform: translateY(-1px);
+  }
+  .rec-icon {
+    font-size: 26px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .rec-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .rec-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .rec-tagline {
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .rec-url {
+    font-size: 11px;
+    color: #93c5fd;
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .copyright {
     margin: 0;

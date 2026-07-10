@@ -726,7 +726,7 @@
     padding: 10px 14px;
     border-radius: 12px;
     background: var(--surface-2);
-    overflow-x: auto;
+    overflow: visible;
   }
   .msg.assistant .msg-body {
     background: var(--surface-2);
@@ -807,6 +807,8 @@
     width: 100%;
     margin: 0.7em 0;
     font-size: 13px;
+    display: block;
+    overflow-x: auto;
   }
   .markdown :global(th),
   .markdown :global(td) {
