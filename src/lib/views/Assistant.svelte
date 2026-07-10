@@ -1,6 +1,8 @@
 <script>
-  import { onMount, tick } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { pushToast, collectSystemSnapshot } from "../stores.js";
+  import { streamChat } from "../aiClient.js";
+  import ChatMessage from "../components/ChatMessage.svelte";
 
   // ===== 内置厂商与模型预设 =====
   // 各厂商的 OpenAI 兼容接口地址与主流最新模型。可随时在下拉里选，也可自定义。
@@ -137,31 +139,33 @@
   $: configured = !!cfg.apiKey && !!cfg.baseUrl && !!cfg.model;
 
   // ===== 对话状态 =====
-  let messages = [];    // { id, role: 'user'|'assistant', html }
+  // 消息存原始文本（assistant 为 Markdown 源码），渲染交给 ChatMessage；
+  // 发送历史给 API 时直接用 text，不做 HTML 剥离的有损转换。
+  let messages = []; // { id, role: 'user'|'assistant', text }
   let msgSeq = 0;
-  let streamingRaw = ""; // 当前正在流式接收的原始文本(不放入 messages,避免模板分支切换)
   let input = "";
   let sending = false;
+  let streamId = null; // 正在流式生成的 assistant 消息 id
+  let client = null;   // streamChat 句柄
   let scroller;
 
-  // 把一条原始文本转成可渲染的 HTML；assistant→markdown, user→纯文本
-  function toHtml(text, role) {
-    if (role === "assistant") return renderMarkdown(text);
-    // user: 转义 + \n→<br/> (已转义的 &#10; 做换行)
-    return escapeHtml(text).replace(/\n/g, "<br />");
+  // ===== 滚动：贴底跟随 =====
+  // 用户停留在底部附近时才自动跟随新内容；上翻阅读时不打扰。
+  let autoFollow = true;
+  function onScroll() {
+    const el = scroller;
+    if (el) autoFollow = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
   }
-
-  // 滚动到底部。关键：必须通过局部别名 el 赋值 scrollTop，绝不能写
-  // `scroller.scrollTop = ...`——对组件级变量 scroller 的成员赋值会被 Svelte
-  // 编译成 $$invalidate(scroller)。一旦有响应式语句依赖 scroller，就会形成
-  // 「设置滚动→标记 scroller 脏→响应式重跑→再设置滚动」的无限自触发，冻死主线程。
-  function scrollToBottom() {
-    // Svelte 在 microtask 后才更新 DOM，用 tick 等渲染完成
-    tick().then(() => { const el = scroller; if (el) el.scrollTop = el.scrollHeight; });
+  // 关键：必须通过局部别名 el 赋值 scrollTop，绝不能写 `scroller.scrollTop = ...`——
+  // 对组件级变量 scroller 的成员赋值会被 Svelte 编译成 $$invalidate(scroller)，
+  // 一旦有响应式语句依赖 scroller 就会无限自触发冻死主线程（踩过的坑）。
+  // 因此这里也不用任何 `$:` 响应式块做滚动，全部显式调用。
+  function scrollToBottom(force = false) {
+    tick().then(() => {
+      const el = scroller;
+      if (el && (force || autoFollow)) el.scrollTop = el.scrollHeight;
+    });
   }
-
-  // 每次 messages 变更自动滚到底（本响应式块只依赖 messages，不触碰 scroller）
-  $: if (messages.length) scrollToBottom();
 
   const quickPrompts = [
     "分析当前系统整体健康状况，指出瓶颈",
@@ -187,7 +191,41 @@
     "2. 涉及结束进程、清理磁盘、改防火墙等有风险操作时，务必提示风险（如 dwm.exe/svchost.exe 等系统关键进程不可随意结束）。\n" +
     "3. 不要编造快照中没有的数据。回答用 Markdown，简洁、条理清晰。";
 
-  let xhr = null;
+  // 按 id 更新一条消息的文本（不可变更新，keyed each 下组件实例保持稳定）
+  function setMessageText(id, text) {
+    messages = messages.map((m) => (m.id === id ? { ...m, text } : m));
+  }
+
+  // ===== 流式增量的 rAF 节流 =====
+  // 网络回调随时到达；DOM 更新对齐渲染帧，每帧至多一次。
+  let pendingText = null;
+  let rafId = 0;
+  function queueStreamText(id, text) {
+    pendingText = text;
+    if (rafId) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = 0;
+      if (pendingText !== null && streamId === id) {
+        setMessageText(id, pendingText);
+        pendingText = null;
+        scrollToBottom();
+      }
+    });
+  }
+  function cancelQueued() {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+    pendingText = null;
+  }
+
+  function finalize(id, text) {
+    cancelQueued();
+    setMessageText(id, text);
+    sending = false;
+    streamId = null;
+    client = null;
+    scrollToBottom();
+  }
 
   function send(text) {
     const content = (text ?? input).trim();
@@ -195,112 +233,44 @@
     if (!configured) { showConfig = true; pushToast("请先配置 API", "warn"); return; }
 
     input = "";
-    messages = [...messages, { id: ++msgSeq, role: "user", html: toHtml(content, "user") }];
-    sending = true;
-    streamingRaw = "";
+    messages = [...messages, { id: ++msgSeq, role: "user", text: content }];
 
     // 快照为纯内存读取(读 store,零 invoke),瞬时完成
     let snapshot = "";
     try { snapshot = collectSystemSnapshot(); } catch {}
 
+    // 历史在占位消息加入之前构建（原始文本，无损）
     const payloadMessages = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "system", content: "当前系统快照：\n" + snapshot },
-      ...messages.map((m) => ({ role: m.role, content: m.html.replace(/<[^>]+>/g, "") })),
+      ...messages.map((m) => ({ role: m.role, content: m.text })),
     ];
 
-    // 用 XMLHttpRequest 做流式：onprogress 完全异步回调,绝不阻塞 UI 主线程。
-    xhr = new XMLHttpRequest();
-    xhr.open("POST", cfg.baseUrl.replace(/\/$/, "") + "/chat/completions");
-    xhr.setRequestHeader("Content-Type", "application/json");
-    xhr.setRequestHeader("Authorization", "Bearer " + cfg.apiKey);
-    xhr.timeout = 60000; // 60s 硬超时
+    // 占位 assistant 消息：从空文本到完成始终是同一个消息节点
+    const aiId = ++msgSeq;
+    messages = [...messages, { id: aiId, role: "assistant", text: "" }];
+    sending = true;
+    streamId = aiId;
+    autoFollow = true;
+    scrollToBottom(true);
 
-    let raw = "";
-    let processed = 0; // 已解析到的 responseText 长度
-    let lastRender = 0;
-
-    const parseChunk = () => {
-      const full = xhr.responseText;
-      const chunk = full.slice(processed);
-      processed = full.length;
-      const lines = chunk.split("\n");
-      for (const line of lines) {
-        const t = line.trim();
-        if (!t.startsWith("data:")) continue;
-        const data = t.slice(5).trim();
-        if (data === "[DONE]") continue;
-        try {
-          const json = JSON.parse(data);
-          raw += json.choices?.[0]?.delta?.content ?? "";
-        } catch {}
+    client = streamChat(
+      { baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, model: cfg.model, messages: payloadMessages },
+      {
+        onDelta: (full) => queueStreamText(aiId, full),
+        onDone: (full) => finalize(aiId, full || "(未返回内容)"),
+        onFail: (msg) => { finalize(aiId, msg); pushToast("AI 请求失败", "error"); },
+        onAbort: (full) => finalize(aiId, full ? full + "\n\n[已停止]" : "[已停止]"),
       }
-      const now = Date.now();
-      if (now - lastRender >= 80) {
-        streamingRaw = raw;
-        lastRender = now;
-        scrollToBottom();
-      }
-    };
-
-    xhr.onprogress = parseChunk;
-
-    xhr.onload = () => {
-      parseChunk();
-      if (xhr.status >= 200 && xhr.status < 300) {
-        const finalHtml = toHtml(raw || "(未返回内容)", "assistant");
-        messages = [...messages, { id: ++msgSeq, role: "assistant", html: finalHtml }];
-      } else {
-        // 非 2xx：responseText 可能是错误 JSON
-        let msg = `HTTP ${xhr.status}`;
-        try { const j = JSON.parse(xhr.responseText); msg += " " + (j.error?.message || xhr.responseText.slice(0, 200)); }
-        catch { msg += " " + xhr.responseText.slice(0, 200); }
-        messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml("请求失败：" + msg, "assistant") }];
-        pushToast("AI 请求失败：" + msg, "error");
-      }
-      finishSend();
-    };
-
-    xhr.onerror = () => {
-      messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml("网络错误：无法连接到 " + cfg.baseUrl + "，请检查网络/代理与 API 地址。", "assistant") }];
-      pushToast("网络错误,无法连接 API", "error");
-      finishSend();
-    };
-
-    xhr.ontimeout = () => {
-      messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml("请求超时(60s)：该 API 地址无响应,请检查网络/代理设置。", "assistant") }];
-      pushToast("请求超时", "error");
-      finishSend();
-    };
-
-    xhr.onabort = () => {
-      const stopped = raw + "\n\n[已停止]";
-      messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml(stopped, "assistant") }];
-      finishSend();
-    };
-
-    // 让气泡先渲染,再发起请求(纯异步,不阻塞)
-    tick().then(() => {
-      try {
-        xhr.send(JSON.stringify({ model: cfg.model, messages: payloadMessages, stream: true }));
-      } catch (e) {
-        pushToast("发送失败：" + e.message, "error");
-        finishSend();
-      }
-    });
-  }
-
-  function finishSend() {
-    sending = false;
-    streamingRaw = "";
-    xhr = null;
+    );
   }
 
   function stop() {
-    if (xhr) xhr.abort();
+    if (client) client.abort();
   }
 
   function clearChat() {
+    if (client) client.abort();
     messages = [];
   }
 
@@ -311,166 +281,16 @@
     }
   }
 
-  // ===== 轻量 Markdown 渲染 =====
-  // 先整体转义 HTML（防 XSS），再解析块级与行内语法，仅生成白名单标签。
-  function escapeHtml(s) {
-    return s
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
-
-  // 行内：`code`、**bold**、*italic*、[text](url)
-  function renderInline(s) {
-    let t = s;
-    // 行内代码先占位，避免其中内容被其它规则误伤
-    const codes = [];
-    t = t.replace(/`([^`]+)`/g, (_, c) => {
-      codes.push(c);
-      return `\u0000CODE${codes.length - 1}\u0000`;
-    });
-    // 链接 [text](http...)，仅允许 http/https
-    t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, txt, url) => {
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${txt}</a>`;
-    });
-    t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-    // 还原行内代码
-    t = t.replace(/\u0000CODE(\d+)\u0000/g, (_, i) => `<code>${codes[+i]}</code>`);
-    return t;
-  }
-
-  function renderMarkdown(src) {
-    if (!src) return "";
-    const escaped = escapeHtml(src);
-    const lines = escaped.split("\n");
-    let html = "";
-    let i = 0;
-
-    const flushList = (buf, ordered) => {
-      if (!buf.length) return "";
-      const tag = ordered ? "ol" : "ul";
-      return `<${tag}>` + buf.map((it) => `<li>${renderInline(it)}</li>`).join("") + `</${tag}>`;
-    };
-
-    while (i < lines.length) {
-      let line = lines[i];
-
-      // 代码块 ```
-      const fence = line.match(/^\s*```(\w*)\s*$/);
-      if (fence) {
-        const body = [];
-        i++;
-        while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) {
-          body.push(lines[i]);
-          i++;
-        }
-        i++; // 跳过结束 ```
-        html += `<pre><code>${body.join("\n")}</code></pre>`;
-        continue;
-      }
-
-      // 表格：当前行含 | 且下一行是分隔行 |---|
-      if (line.includes("|") && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1]) && lines[i + 1].includes("-")) {
-        const parseRow = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-        const headers = parseRow(line);
-        i += 2; // 跳过表头与分隔行
-        const bodyRows = [];
-        while (i < lines.length && lines[i].includes("|") && lines[i].trim() !== "") {
-          bodyRows.push(parseRow(lines[i]));
-          i++;
-        }
-        let t = "<table><thead><tr>";
-        t += headers.map((h) => `<th>${renderInline(h)}</th>`).join("");
-        t += "</tr></thead><tbody>";
-        for (const row of bodyRows) {
-          t += "<tr>" + headers.map((_, ci) => `<td>${renderInline(row[ci] ?? "")}</td>`).join("") + "</tr>";
-        }
-        t += "</tbody></table>";
-        html += t;
-        continue;
-      }
-
-      // 标题 # .. ######
-      const heading = line.match(/^(#{1,6})\s+(.*)$/);
-      if (heading) {
-        const level = heading[1].length;
-        html += `<h${level}>${renderInline(heading[2])}</h${level}>`;
-        i++;
-        continue;
-      }
-
-      // 分隔线
-      if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
-        html += "<hr />";
-        i++;
-        continue;
-      }
-
-      // 引用 >
-      if (/^\s*>\s?/.test(line)) {
-        const quote = [];
-        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-          quote.push(lines[i].replace(/^\s*>\s?/, ""));
-          i++;
-        }
-        html += `<blockquote>${renderInline(quote.join(" "))}</blockquote>`;
-        continue;
-      }
-
-      // 无序列表
-      if (/^\s*[-*+]\s+/.test(line)) {
-        const buf = [];
-        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
-          buf.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
-          i++;
-        }
-        html += flushList(buf, false);
-        continue;
-      }
-
-      // 有序列表
-      if (/^\s*\d+\.\s+/.test(line)) {
-        const buf = [];
-        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-          buf.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
-          i++;
-        }
-        html += flushList(buf, true);
-        continue;
-      }
-
-      // 空行
-      if (line.trim() === "") {
-        i++;
-        continue;
-      }
-
-      // 普通段落：合并连续非空、非块级起始行
-      const para = [line];
-      i++;
-      while (
-        i < lines.length &&
-        lines[i].trim() !== "" &&
-        !/^\s*```/.test(lines[i]) &&
-        !/^(#{1,6})\s+/.test(lines[i]) &&
-        !/^\s*[-*+]\s+/.test(lines[i]) &&
-        !/^\s*\d+\.\s+/.test(lines[i]) &&
-        !/^\s*>\s?/.test(lines[i]) &&
-        !(lines[i].includes("|") && lines[i].includes("-"))
-      ) {
-        para.push(lines[i]);
-        i++;
-      }
-      html += `<p>${renderInline(para.join("<br />"))}</p>`;
-    }
-    return html;
-  }
-
   onMount(loadConfig);
+  onDestroy(() => {
+    cancelQueued();
+    if (client) client.abort();
+  });
 </script>
 
-<div class="assistant">
+<!-- 根容器类名 ai-view：绝不可叫 "assistant"——消息 role 同名，
+     历史上曾因此让根布局规则命中每条 AI 消息行，造成整屏重叠。 -->
+<div class="ai-view">
   <!-- 顶部栏 -->
   <div class="ai-head">
     <div class="ai-title">
@@ -541,7 +361,7 @@
   {/if}
 
   <!-- 对话区 -->
-  <div class="chat-scroll" bind:this={scroller}>
+  <div class="chat-scroll" bind:this={scroller} on:scroll={onScroll}>
     {#if messages.length === 0}
       <div class="empty-state">
         <div class="empty-title">向 AI 询问系统状况</div>
@@ -554,31 +374,8 @@
       </div>
     {:else}
       {#each messages as m (m.id)}
-        <div class="msg {m.role}">
-          <div class="msg-role">{m.role === "user" ? "我" : "AI"}</div>
-          <div class="msg-body">
-            <div class="msg-text {m.role === 'assistant' ? 'markdown' : ''}">{@html m.html}</div>
-          </div>
-        </div>
+        <ChatMessage role={m.role} text={m.text} streaming={sending && m.id === streamId} />
       {/each}
-      <!-- 发送中 + 尚无流式内容：显示加载态 -->
-      {#if sending && !streamingRaw}
-        <div class="msg assistant">
-          <div class="msg-role">AI</div>
-          <div class="msg-body">
-            <span class="typing"><span></span><span></span><span></span></span>
-          </div>
-        </div>
-      {/if}
-      <!-- 流式进行中的临时块（纯文本，不存在 messages 里）-->
-      {#if streamingRaw}
-        <div class="msg assistant">
-          <div class="msg-role">AI</div>
-          <div class="msg-body">
-            <div class="msg-text">{streamingRaw}</div>
-          </div>
-        </div>
-      {/if}
     {/if}
   </div>
 
@@ -601,7 +398,7 @@
 </div>
 
 <style>
-  .assistant {
+  .ai-view {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 140px);
@@ -746,137 +543,6 @@
   }
   .quick-card:hover:not(:disabled) { border-color: var(--accent); background: rgba(99, 102, 241, 0.08); }
   .quick-card:disabled { opacity: 0.5; cursor: default; }
-
-  .msg { display: flex; gap: var(--sp-3); margin-bottom: var(--sp-4); align-items: flex-start; }
-  .msg.user { flex-direction: row-reverse; }
-  .msg-role {
-    flex-shrink: 0;
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .msg.user .msg-role { background: rgba(99, 102, 241, 0.18); color: var(--accent); }
-  .msg.assistant .msg-role { background: rgba(34, 197, 94, 0.14); color: var(--ok); }
-  .msg-body {
-    max-width: min(760px, 82%);
-    width: fit-content;
-    min-width: 0;
-    padding: 10px 14px;
-    border-radius: 12px;
-    background: var(--surface-2);
-    overflow: visible;
-  }
-  .msg.assistant .msg-body {
-    background: var(--surface-2);
-    border-top-left-radius: 4px;
-  }
-  .msg.user .msg-body {
-    background: rgba(99, 102, 241, 0.14);
-    border-top-right-radius: 4px;
-  }
-  .msg-text {
-    font-size: 14px;
-    line-height: 1.7;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .msg.user .msg-text { color: var(--text); }
-
-  /* Markdown 渲染样式 */
-  .msg-text.markdown { white-space: normal; }
-  .markdown :global(> :first-child) { margin-top: 0; }
-  .markdown :global(> :last-child) { margin-bottom: 0; }
-  .markdown :global(h1),
-  .markdown :global(h2),
-  .markdown :global(h3),
-  .markdown :global(h4) {
-    margin: 0.9em 0 0.4em;
-    font-weight: 600;
-    line-height: 1.35;
-  }
-  .markdown :global(h1) { font-size: 18px; }
-  .markdown :global(h2) { font-size: 16px; }
-  .markdown :global(h3) { font-size: 15px; }
-  .markdown :global(h4) { font-size: 14px; color: var(--text-muted); }
-  .markdown :global(p) { margin: 0.5em 0; }
-  .markdown :global(ul),
-  .markdown :global(ol) { margin: 0.5em 0; padding-left: 1.4em; }
-  .markdown :global(li) { margin: 0.25em 0; }
-  .markdown :global(strong) { font-weight: 600; color: var(--text); }
-  .markdown :global(em) { font-style: italic; }
-  .markdown :global(a) { color: var(--accent); text-decoration: underline; }
-  .markdown :global(hr) {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 1em 0;
-  }
-  .markdown :global(blockquote) {
-    margin: 0.6em 0;
-    padding: 4px 12px;
-    border-left: 3px solid var(--accent);
-    color: var(--text-muted);
-    background: var(--surface-2);
-    border-radius: 0 6px 6px 0;
-  }
-  .markdown :global(code) {
-    font-family: var(--font-mono);
-    font-size: 12.5px;
-    background: var(--surface-2);
-    padding: 1px 5px;
-    border-radius: 4px;
-  }
-  .markdown :global(pre) {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 10px 12px;
-    overflow-x: auto;
-    margin: 0.6em 0;
-  }
-  .markdown :global(pre code) {
-    background: transparent;
-    padding: 0;
-    font-size: 12.5px;
-    line-height: 1.6;
-    white-space: pre;
-  }
-  .markdown :global(table) {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 0.7em 0;
-    font-size: 13px;
-    display: block;
-    overflow-x: auto;
-  }
-  .markdown :global(th),
-  .markdown :global(td) {
-    border: 1px solid var(--border);
-    padding: 6px 10px;
-    text-align: left;
-    vertical-align: top;
-  }
-  .markdown :global(th) {
-    background: var(--surface-2);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .markdown :global(tr:nth-child(even) td) {
-    background: rgba(255, 255, 255, 0.02);
-  }
-
-  .typing { display: inline-flex; gap: 4px; padding: 6px 0; }
-  .typing span {
-    width: 6px; height: 6px; border-radius: 999px; background: var(--text-muted);
-    animation: blink 1.2s infinite ease-in-out;
-  }
-  .typing span:nth-child(2) { animation-delay: 0.2s; }
-  .typing span:nth-child(3) { animation-delay: 0.4s; }
-  @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 
   .input-bar {
     display: flex;
