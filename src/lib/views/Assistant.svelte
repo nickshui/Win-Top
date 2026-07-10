@@ -137,13 +137,31 @@
   $: configured = !!cfg.apiKey && !!cfg.baseUrl && !!cfg.model;
 
   // ===== 对话状态 =====
-  let messages = []; // { id, role: 'user'|'assistant', content }
+  let messages = [];    // { id, role: 'user'|'assistant', html }
   let msgSeq = 0;
-  let streamingId = null; // 正在流式输出的 assistant 消息 id
+  let streamingRaw = ""; // 当前正在流式接收的原始文本(不放入 messages,避免模板分支切换)
   let input = "";
   let sending = false;
   let scroller;
-  let abortCtrl = null;
+
+  // 把一条原始文本转成可渲染的 HTML；assistant→markdown, user→纯文本
+  function toHtml(text, role) {
+    if (role === "assistant") return renderMarkdown(text);
+    // user: 转义 + \n→<br/> (已转义的 &#10; 做换行)
+    return escapeHtml(text).replace(/\n/g, "<br />");
+  }
+
+  // 滚动到底部。关键：必须通过局部别名 el 赋值 scrollTop，绝不能写
+  // `scroller.scrollTop = ...`——对组件级变量 scroller 的成员赋值会被 Svelte
+  // 编译成 $$invalidate(scroller)。一旦有响应式语句依赖 scroller，就会形成
+  // 「设置滚动→标记 scroller 脏→响应式重跑→再设置滚动」的无限自触发，冻死主线程。
+  function scrollToBottom() {
+    // Svelte 在 microtask 后才更新 DOM，用 tick 等渲染完成
+    tick().then(() => { const el = scroller; if (el) el.scrollTop = el.scrollHeight; });
+  }
+
+  // 每次 messages 变更自动滚到底（本响应式块只依赖 messages，不触碰 scroller）
+  $: if (messages.length) scrollToBottom();
 
   const quickPrompts = [
     "分析当前系统整体健康状况，指出瓶颈",
@@ -158,10 +176,10 @@
     "【核心原则】优先引导用户使用 Win-Top 软件内已有的图形化功能来解决问题，而不是让用户去命令行敲 netstat/tasklist/taskkill 等命令。" +
     "只有当软件确实没有对应能力时，才退而给出命令行方案。引导时请明确指出：进入哪个左侧菜单 → 用哪个功能 → 怎么操作。\n\n" +
     "【Win-Top 已内置的功能清单（请据此引导）】\n" +
-    "- 「网络与端口」→ 端口连接：在搜索框输入端口号（如 5050）即可筛出占用该端口的进程，点该行右侧「结束」按钮即可一键关闭对应进程（会自动分析同端口 v4/v6 绑定，避免误杀）。这是关闭指定端口占用的首选方式。该页还有：一键网络体检、下行测速、输入「域名/IP:端口」检测连通性。\n" +
-    "- 「进程管理」→ 支持列表/树形视图、可调刷新间隔(1s/2s/5s/暂停)、按 CPU/内存/磁盘排序、结束进程、设置优先级、查看进程详情（命令行/路径/句柄等）。要结束某个高占用进程用这里。\n" +
-    "- 「磁盘管理」→ 分区使用率、物理磁盘 SMART 健康/温度；「空间分析」标签可对整盘做 MFT 极速扫描，列出最大目录/文件，支持目录逐级下钻、在资源管理器中定位。要清理大文件/找占用空间的目录用这里。\n" +
-    "- 「优化加速」→ 一键加速（垃圾清理+内存释放）、单独的垃圾清理、内存释放、启动项管理（禁用开机自启）、系统体检评分。要释放内存/清理垃圾/管理开机启动项用这里。\n" +
+    "- 「网络与端口」→ 端口连接：在搜索框输入端口号（如 5050）即可筛出占用该端口的进程，点该行右侧「结束」按钮即可一键关闭对应进程（会自动分析同端口 v4/v6 绑定，避免误杀）。该页还有：一键网络体检、下行测速、输入「域名/IP:端口」检测连通性。\n" +
+    "- 「进程管理」→ 支持列表/树形视图、可调刷新间隔(1s/2s/5s/暂停)、按 CPU/内存/磁盘排序、结束进程、设置优先级、查看进程详情（命令行/路径/句柄等）。\n" +
+    "- 「磁盘管理」→ 分区使用率、物理磁盘 SMART 健康/温度；「空间分析」标签可对整盘做 MFT 极速扫描，列出最大目录/文件，支持目录逐级下钻、在资源管理器中定位。\n" +
+    "- 「优化加速」→ 一键加速（垃圾清理+内存释放）、单独的垃圾清理、内存释放、启动项管理（禁用开机自启）、系统体检评分。\n" +
     "- 「系统工具」→ 防火墙规则开关、创建系统还原点、文件解锁（查找并结束占用某文件的进程）、导出系统快照(JSON/CSV)。\n" +
     "- 「概览」→ 实时 CPU/内存/磁盘/网络指标与可交互历史趋势图；「实时事件」→ ETW 进程启动/退出事件流。\n\n" +
     "【回答要求】\n" +
@@ -169,102 +187,117 @@
     "2. 涉及结束进程、清理磁盘、改防火墙等有风险操作时，务必提示风险（如 dwm.exe/svchost.exe 等系统关键进程不可随意结束）。\n" +
     "3. 不要编造快照中没有的数据。回答用 Markdown，简洁、条理清晰。";
 
-  async function scrollToBottom() {
-    await tick();
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
-  }
+  let xhr = null;
 
-  async function send(text) {
+  function send(text) {
     const content = (text ?? input).trim();
     if (!content || sending) return;
     if (!configured) { showConfig = true; pushToast("请先配置 API", "warn"); return; }
 
     input = "";
-    messages = [...messages, { id: ++msgSeq, role: "user", content }];
-    await scrollToBottom();
-
+    messages = [...messages, { id: ++msgSeq, role: "user", html: toHtml(content, "user") }];
     sending = true;
-    // 采集真实系统快照，作为附加上下文
+    streamingRaw = "";
+
+    // 快照为纯内存读取(读 store,零 invoke),瞬时完成
     let snapshot = "";
-    try { snapshot = await collectSystemSnapshot(); } catch {}
+    try { snapshot = collectSystemSnapshot(); } catch {}
 
     const payloadMessages = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "system", content: "当前系统快照：\n" + snapshot },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ...messages.map((m) => ({ role: m.role, content: m.html.replace(/<[^>]+>/g, "") })),
     ];
 
-    // 预插入一个空的 assistant 气泡用于流式填充，用 id 定位以避免索引错位
-    const aiId = ++msgSeq;
-    streamingId = aiId; // 流式期间该气泡按纯文本渲染，避免半成品 Markdown 生成未闭合 HTML
-    messages = [...messages, { id: aiId, role: "assistant", content: "" }];
+    // 用 XMLHttpRequest 做流式：onprogress 完全异步回调,绝不阻塞 UI 主线程。
+    xhr = new XMLHttpRequest();
+    xhr.open("POST", cfg.baseUrl.replace(/\/$/, "") + "/chat/completions");
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.setRequestHeader("Authorization", "Bearer " + cfg.apiKey);
+    xhr.timeout = 60000; // 60s 硬超时
 
-    // 按 id 不可变更新指定消息内容
-    const setAiContent = (updater) => {
-      messages = messages.map((m) =>
-        m.id === aiId ? { ...m, content: updater(m.content) } : m
-      );
+    let raw = "";
+    let processed = 0; // 已解析到的 responseText 长度
+    let lastRender = 0;
+
+    const parseChunk = () => {
+      const full = xhr.responseText;
+      const chunk = full.slice(processed);
+      processed = full.length;
+      const lines = chunk.split("\n");
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const data = t.slice(5).trim();
+        if (data === "[DONE]") continue;
+        try {
+          const json = JSON.parse(data);
+          raw += json.choices?.[0]?.delta?.content ?? "";
+        } catch {}
+      }
+      const now = Date.now();
+      if (now - lastRender >= 80) {
+        streamingRaw = raw;
+        lastRender = now;
+        scrollToBottom();
+      }
     };
 
-    abortCtrl = new AbortController();
-    try {
-      const resp = await fetch(cfg.baseUrl.replace(/\/$/, "") + "/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + cfg.apiKey,
-        },
-        body: JSON.stringify({ model: cfg.model, messages: payloadMessages, stream: true }),
-        signal: abortCtrl.signal,
-      });
+    xhr.onprogress = parseChunk;
 
-      if (!resp.ok) {
-        const errText = await resp.text().catch(() => "");
-        throw new Error(`HTTP ${resp.status} ${errText.slice(0, 300)}`);
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n");
-        buffer = parts.pop() ?? "";
-        for (const line of parts) {
-          const t = line.trim();
-          if (!t.startsWith("data:")) continue;
-          const data = t.slice(5).trim();
-          if (data === "[DONE]") continue;
-          try {
-            const json = JSON.parse(data);
-            const delta = json.choices?.[0]?.delta?.content ?? "";
-            if (delta) {
-              setAiContent((c) => c + delta);
-              await scrollToBottom();
-            }
-          } catch {}
-        }
-      }
-      setAiContent((c) => c || "(未返回内容)");
-    } catch (e) {
-      if (e.name === "AbortError") {
-        setAiContent((c) => c + "\n\n[已停止]");
+    xhr.onload = () => {
+      parseChunk();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const finalHtml = toHtml(raw || "(未返回内容)", "assistant");
+        messages = [...messages, { id: ++msgSeq, role: "assistant", html: finalHtml }];
       } else {
-        setAiContent(() => "请求失败：" + e.message);
-        pushToast("AI 请求失败：" + e.message, "error");
+        // 非 2xx：responseText 可能是错误 JSON
+        let msg = `HTTP ${xhr.status}`;
+        try { const j = JSON.parse(xhr.responseText); msg += " " + (j.error?.message || xhr.responseText.slice(0, 200)); }
+        catch { msg += " " + xhr.responseText.slice(0, 200); }
+        messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml("请求失败：" + msg, "assistant") }];
+        pushToast("AI 请求失败：" + msg, "error");
       }
-    } finally {
-      sending = false;
-      streamingId = null; // 结束后切回 Markdown 渲染
-      abortCtrl = null;
-    }
+      finishSend();
+    };
+
+    xhr.onerror = () => {
+      messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml("网络错误：无法连接到 " + cfg.baseUrl + "，请检查网络/代理与 API 地址。", "assistant") }];
+      pushToast("网络错误,无法连接 API", "error");
+      finishSend();
+    };
+
+    xhr.ontimeout = () => {
+      messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml("请求超时(60s)：该 API 地址无响应,请检查网络/代理设置。", "assistant") }];
+      pushToast("请求超时", "error");
+      finishSend();
+    };
+
+    xhr.onabort = () => {
+      const stopped = raw + "\n\n[已停止]";
+      messages = [...messages, { id: ++msgSeq, role: "assistant", html: toHtml(stopped, "assistant") }];
+      finishSend();
+    };
+
+    // 让气泡先渲染,再发起请求(纯异步,不阻塞)
+    tick().then(() => {
+      try {
+        xhr.send(JSON.stringify({ model: cfg.model, messages: payloadMessages, stream: true }));
+      } catch (e) {
+        pushToast("发送失败：" + e.message, "error");
+        finishSend();
+      }
+    });
+  }
+
+  function finishSend() {
+    sending = false;
+    streamingRaw = "";
+    xhr = null;
   }
 
   function stop() {
-    if (abortCtrl) abortCtrl.abort();
+    if (xhr) xhr.abort();
   }
 
   function clearChat() {
@@ -524,18 +557,28 @@
         <div class="msg {m.role}">
           <div class="msg-role">{m.role === "user" ? "我" : "AI"}</div>
           <div class="msg-body">
-            {#if m.content}
-              {#if m.role === "assistant" && m.id !== streamingId}
-                <div class="msg-text markdown">{@html renderMarkdown(m.content)}</div>
-              {:else}
-                <div class="msg-text">{m.content}</div>
-              {/if}
-            {:else}
-              <span class="typing"><span></span><span></span><span></span></span>
-            {/if}
+            <div class="msg-text {m.role === 'assistant' ? 'markdown' : ''}">{@html m.html}</div>
           </div>
         </div>
       {/each}
+      <!-- 发送中 + 尚无流式内容：显示加载态 -->
+      {#if sending && !streamingRaw}
+        <div class="msg assistant">
+          <div class="msg-role">AI</div>
+          <div class="msg-body">
+            <span class="typing"><span></span><span></span><span></span></span>
+          </div>
+        </div>
+      {/if}
+      <!-- 流式进行中的临时块（纯文本，不存在 messages 里）-->
+      {#if streamingRaw}
+        <div class="msg assistant">
+          <div class="msg-role">AI</div>
+          <div class="msg-body">
+            <div class="msg-text">{streamingRaw}</div>
+          </div>
+        </div>
+      {/if}
     {/if}
   </div>
 

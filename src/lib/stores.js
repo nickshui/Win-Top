@@ -187,23 +187,14 @@ export function startCleanupNotifications() {
 
 // ===== AI 助手：采集真实系统快照作为对话上下文 =====
 // 汇总当前 metrics、进程 TOP、磁盘容量，生成结构化文本供 LLM 参考。
-export async function collectSystemSnapshot() {
+// 采集系统快照：仅读取后台常驻采集的 store（纯内存、零阻塞），
+// 绝不调用 invoke("get_processes") 等同步 Tauri 命令——那会在 Rust 主线程
+// 全量枚举进程，冻结整个 WebView UI。
+export function collectSystemSnapshot() {
   const m = get(metrics);
   const io = get(diskIo);
-
-  let procs = [];
-  try {
-    procs = await invoke("get_processes");
-  } catch {}
-
-  let disk = get(diskReport);
-  if (!disk) {
-    try { disk = await loadDiskReport(); } catch {}
-  }
-
-  // CPU / 内存 TOP 5
-  const byCpu = [...procs].sort((a, b) => b.cpu - a.cpu).slice(0, 5);
-  const byMem = [...procs].sort((a, b) => b.mem_mb - a.mem_mb).slice(0, 5);
+  const disk = get(diskReport);
+  const net = get(netTraffic);
 
   const lines = [];
   lines.push("【系统实时指标】");
@@ -214,19 +205,22 @@ export async function collectSystemSnapshot() {
     lines.push(`磁盘 I/O: 读 ${fmtBytesPerSec(m.disk_read_bps)} / 写 ${fmtBytesPerSec(m.disk_write_bps)}`);
     lines.push(`网络吞吐: ${(m.net_total_bps * 8 / 1e6).toFixed(2)} Mbps`);
   } else {
-    lines.push("(实时指标尚未就绪)");
+    lines.push("(实时指标尚未就绪，请稍候再问)");
   }
 
-  lines.push("", `【进程总数】${procs.length}`);
-  lines.push("", "【CPU 占用 TOP 5】");
-  byCpu.forEach((p) => lines.push(`- ${p.name} (PID ${p.pid}): CPU ${p.cpu.toFixed(1)}%, 内存 ${p.mem_mb.toFixed(0)} MB, 线程 ${p.threads}`));
-  lines.push("", "【内存占用 TOP 5】");
-  byMem.forEach((p) => lines.push(`- ${p.name} (PID ${p.pid}): 内存 ${p.mem_mb.toFixed(0)} MB, CPU ${p.cpu.toFixed(1)}%`));
-
+  // 磁盘 I/O TOP（来自后台 disk-io 事件，已含进程名/PID）
   if (io?.rows?.length) {
-    lines.push("", "【磁盘 I/O TOP 5】");
+    lines.push("", "【磁盘 I/O 活跃进程 TOP 5】");
     io.rows.slice(0, 5).forEach((r) =>
       lines.push(`- ${r.name} (PID ${r.pid}): 读 ${fmtBytesPerSec(r.read_bps)}, 写 ${fmtBytesPerSec(r.write_bps)}`)
+    );
+  }
+
+  // 网络流量 TOP（来自后台 net-traffic 事件，如可用）
+  if (net?.rows?.length) {
+    lines.push("", "【网络流量进程 TOP 5】");
+    net.rows.slice(0, 5).forEach((r) =>
+      lines.push(`- ${r.name} (PID ${r.pid}): ↓${fmtBytesPerSec(r.down_bps)} ↑${fmtBytesPerSec(r.up_bps)}`)
     );
   }
 
@@ -237,8 +231,11 @@ export async function collectSystemSnapshot() {
       const totalGb = (v.total / 1024 ** 3).toFixed(1);
       lines.push(`- ${v.drive} ${v.label || ""}: 已用 ${v.used_pct?.toFixed(0)}%, 可用 ${freeGb}/${totalGb} GB`);
     });
+  } else {
+    lines.push("", "【磁盘分区】(未加载，用户可到「磁盘管理」查看)");
   }
 
+  lines.push("", "注：进程级 CPU/内存 TOP 明细可让用户到「进程管理」页按列排序查看。");
   return lines.join("\n");
 }
 
