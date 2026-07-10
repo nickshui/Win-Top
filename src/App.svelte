@@ -12,6 +12,7 @@
   import Placeholder from "./lib/views/Placeholder.svelte";
   import Optimize from "./lib/views/Optimize.svelte";
   import Tools from "./lib/views/Tools.svelte";
+  import Assistant from "./lib/views/Assistant.svelte";
   import Toast from "./lib/components/Toast.svelte";
 
   let current = "overview";
@@ -88,6 +89,8 @@
         <Optimize navigate={(id) => (current = id)} />
       {:else if current === "tools"}
         <Tools />
+      {:else if current === "ai"}
+        <Assistant />
       {:else if current === "about"}
         <About />
       {:else}

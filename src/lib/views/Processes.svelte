@@ -12,6 +12,17 @@
   let timer;
   let viewMode = "list";
 
+  // 刷新控制
+  const intervals = [
+    { label: "1s", ms: 1000 },
+    { label: "2s", ms: 2000 },
+    { label: "5s", ms: 5000 },
+    { label: "暂停", ms: 0 },
+  ];
+  let refreshMs = 2000;
+  // 交互时临时冻结：选中行 / 打开菜单时暂停刷新，避免行跳位难以选中
+  let frozen = false;
+
   // 详情面板
   let detailPid = null;
   let detailData = null;
@@ -27,12 +38,24 @@
   let allExpanded = false;
 
   async function refresh() {
+    if (frozen) return; // 冻结期间跳过（保持选中稳定）
     try {
       rows = await invoke("get_processes");
       loading = false;
     } catch (e) {
       pushToast("加载进程失败：" + e, "error");
     }
+  }
+
+  function restartTimer() {
+    if (timer) clearInterval(timer);
+    timer = null;
+    if (refreshMs > 0) timer = setInterval(refresh, refreshMs);
+  }
+
+  function setInterval_(ms) {
+    refreshMs = ms;
+    restartTimer();
   }
 
   async function showDetail(pid) {
@@ -48,8 +71,11 @@
     } finally { detailLoading = false; }
   }
 
-  onMount(() => { refresh(); timer = setInterval(refresh, 2000); });
-  onDestroy(() => clearInterval(timer));
+  onMount(() => { refresh(); restartTimer(); });
+  onDestroy(() => { if (timer) clearInterval(timer); });
+
+  // 选中某行详情、或打开结束/优先级菜单时，冻结刷新以保证选中稳定。
+  $: frozen = detailPid != null || termTarget != null || prioTarget != null;
 
   function setSort(k) {
     if (sortKey === k) sortDir = -sortDir;
@@ -177,7 +203,25 @@
       <button class="ghost-sm" on:click={expandAll}>展开全部</button>
     {/if}
   {/if}
-  <span class="count">{merged.length} / {rows.length} 进程 · 每 2s 刷新</span>
+  <div class="refresh-group" title="刷新间隔">
+    {#each intervals as it}
+      <button
+        class="int-btn"
+        class:active={refreshMs === it.ms}
+        on:click={() => setInterval_(it.ms)}
+      >{it.label}</button>
+    {/each}
+  </div>
+  <span class="count">
+    {merged.length} / {rows.length} 进程
+    {#if frozen}
+      · <span class="frozen-tag">已冻结</span>
+    {:else if refreshMs > 0}
+      · 每 {refreshMs / 1000}s 刷新
+    {:else}
+      · 手动
+    {/if}
+  </span>
 </div>
 
 <div class="content-area">
@@ -310,6 +354,12 @@
   .ghost-sm { border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-family: inherit; font-size: 12px; padding: 4px 10px; border-radius: 8px; cursor: pointer; }
   .ghost-sm:hover { background: var(--surface-2); color: var(--text); }
   .count { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); margin-left: auto; }
+  .refresh-group { display: flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+  .int-btn { border: none; background: transparent; color: var(--text-muted); font-family: inherit; font-size: 12px; padding: 6px 10px; cursor: pointer; border-left: 1px solid var(--border); }
+  .int-btn:first-child { border-left: none; }
+  .int-btn:hover { color: var(--text); background: var(--surface-2); }
+  .int-btn.active { background: var(--accent); color: #fff; }
+  .frozen-tag { color: var(--warn); }
 
   .content-area { display: flex; gap: 0; }
   .table-wrap { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }

@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
+  import { open as shellOpen } from "@tauri-apps/api/shell";
   import { pushToast } from "../stores.js";
 
   let tab = "overview";
@@ -61,6 +62,7 @@
     scanLoading = true;
     scanResult = null;
     scanError = null;
+    resetDrill();
     try {
       scanResult = await invoke("scan_volume", { drive, topN: 50 });
       if (scanResult.errors > 0) {
@@ -75,6 +77,63 @@
   }
 
   const srcLabel = (s) => (s === "mft" ? "MFT 极速扫描" : "逐目录扫描");
+
+  // 将扫描结果里的路径拼成绝对路径。
+  // MFT 扫描给出的是相对盘符根的路径（如 "Users\\x\\y"）；walk 回退可能已是绝对路径。
+  function absPath(p) {
+    if (!p) return scanDrive.replace(/\\?$/, "\\");
+    // 已含盘符 (C:\...) 或 UNC (\\server) 视为绝对
+    if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\")) return p;
+    const root = scanDrive.replace(/[:\\]*$/, ""); // "D:" -> "D"
+    return `${root}:\\${p.replace(/^[\\/]+/, "")}`;
+  }
+
+  function parentDir(p) {
+    const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+    return idx > 2 ? p.slice(0, idx) : p;
+  }
+
+  // 在资源管理器中打开目录（或定位文件所在目录）
+  async function openInExplorer(rawPath, isFile) {
+    const abs = absPath(rawPath);
+    const target = isFile ? parentDir(abs) : abs;
+    try {
+      await shellOpen(target);
+    } catch (e) {
+      pushToast("无法打开：" + target, "error");
+    }
+  }
+
+  // ——— 目录下钻 ———
+  let drillStack = []; // [{ path, result }]
+  let drillLoading = false;
+
+  async function drillInto(rawPath) {
+    const abs = absPath(rawPath);
+    drillLoading = true;
+    try {
+      const res = await invoke("scan_directory", { dirPath: abs, topN: 50 });
+      drillStack = [...drillStack, { path: abs, result: res }];
+    } catch (e) {
+      pushToast("下钻扫描失败：" + e, "error");
+    } finally {
+      drillLoading = false;
+    }
+  }
+
+  function drillBack(toIndex) {
+    // toIndex = -1 表示回到整卷视图
+    drillStack = drillStack.slice(0, toIndex + 1);
+  }
+
+  // 当前展示的结果：优先下钻栈顶，否则整卷扫描
+  $: activeResult = drillStack.length > 0 ? drillStack[drillStack.length - 1].result : scanResult;
+  $: activeRoot = drillStack.length > 0 ? drillStack[drillStack.length - 1].path : scanDrive;
+
+  // 切换盘符时清空下钻栈
+  function resetDrill() {
+    drillStack = [];
+  }
 
   const fmtTime = (secs) => {
     if (!secs) return "-";
@@ -98,7 +157,7 @@
   };
 
   // Max bar width calculation
-  $: maxDirSize = scanResult?.dirs?.[0]?.total_size ?? 1;
+  $: maxDirSize = activeResult?.dirs?.[0]?.total_size ?? 1;
 </script>
 
 <div class="tabs" role="tablist">
@@ -192,14 +251,22 @@
     </div>
 
     {#if scanLoading}
-      <p class="scan-status">正在扫描 {scanDrive} 整盘，首次读取 MFT 需管理员权限…</p>
+      <div class="scan-loading">
+        <div class="spinner"></div>
+        <p class="scan-status">正在扫描 {scanDrive} 整盘，首次读取 MFT 需管理员权限…</p>
+        <div class="skeleton-list">
+          {#each Array(6) as _}
+            <div class="skeleton-row"></div>
+          {/each}
+        </div>
+      </div>
     {/if}
 
     {#if scanError}
       <div class="note">{scanError}</div>
     {/if}
 
-    {#if scanResult}
+    {#if scanResult && !scanLoading}
       <div class="scan-summary">
         <div class="sum-item"><span class="sum-val mono">{fmtCount(scanResult.scanned)}</span><span class="sum-label">已扫描文件</span></div>
         <div class="sum-item"><span class="sum-val mono">{(scanResult.elapsed_ms / 1000).toFixed(2)}s</span><span class="sum-label">耗时</span></div>
@@ -209,38 +276,58 @@
         {/if}
       </div>
 
-      {#if scanResult.dirs.length > 0}
+      <!-- 面包屑：整卷 → 下钻路径 -->
+      <div class="breadcrumb">
+        <button class="crumb" class:active={drillStack.length === 0} on:click={() => drillBack(-1)}>
+          {scanDrive} 整卷
+        </button>
+        {#each drillStack as d, i}
+          <span class="crumb-sep">›</span>
+          <button class="crumb" class:active={i === drillStack.length - 1} on:click={() => drillBack(i)} title={d.path}>
+            {d.path.split(/[\\/]/).filter(Boolean).pop() || d.path}
+          </button>
+        {/each}
+        {#if drillLoading}<span class="crumb-loading">下钻中…</span>{/if}
+      </div>
+
+      {#if activeResult?.dirs?.length > 0}
         <section class="dir-section">
-          <h4 class="section-subtitle">目录分布</h4>
+          <h4 class="section-subtitle">目录分布 <span class="hint">（点击目录名下钻）</span></h4>
           <div class="dir-list">
-            {#each scanResult.dirs.slice(0, 20) as dir (dir.path)}
+            {#each activeResult.dirs.slice(0, 20) as dir (dir.path)}
               <div class="dir-row">
-                <span class="dir-path mono" title={dir.path}>{dir.path || "(根目录)"}</span>
+                <button class="dir-path mono" title="{dir.path}（点击下钻）" on:click={() => drillInto(dir.path)}>
+                  <span class="dir-ico">📁</span>{dir.path || "(根目录)"}
+                </button>
                 <span class="dir-size mono">{fmtSize(dir.total_size)}</span>
                 <span class="dir-count mono">{fmtCount(dir.file_count)} 文件</span>
                 <div class="dir-bar-track">
                   <div class="dir-bar-fill" style="width:{(dir.total_size / maxDirSize * 100).toFixed(1)}%"></div>
                 </div>
+                <button class="row-act" title="在资源管理器中打开" on:click={() => openInExplorer(dir.path, false)}>打开</button>
               </div>
             {/each}
           </div>
         </section>
       {/if}
 
-      {#if scanResult.large_files.length > 0}
+      {#if activeResult?.large_files?.length > 0}
         <section class="files-section">
-          <h4 class="section-subtitle">最大文件 TOP {scanResult.large_files.length}</h4>
+          <h4 class="section-subtitle">最大文件 TOP {activeResult.large_files.length}</h4>
           <div class="table-wrap small-table">
             <table>
               <thead>
-                <tr><th>文件路径</th><th class="num">大小</th><th class="num">修改时间</th></tr>
+                <tr><th>文件路径</th><th class="num">大小</th><th class="num">修改时间</th><th class="col-fact">操作</th></tr>
               </thead>
               <tbody>
-                {#each scanResult.large_files as f (f.path)}
+                {#each activeResult.large_files as f (f.path)}
                   <tr>
                     <td class="file-path mono" title={f.path}>{f.path}</td>
                     <td class="num mono">{fmtSize(f.size)}</td>
                     <td class="num mono">{fmtTime(f.modified_secs)}</td>
+                    <td class="col-fact">
+                      <button class="row-act" title="在资源管理器中定位" on:click={() => openInExplorer(f.path, true)}>定位</button>
+                    </td>
                   </tr>
                 {/each}
               </tbody>
@@ -577,16 +664,132 @@
   }
   .dir-row {
     display: grid;
-    grid-template-columns: 1fr 100px 80px 200px;
+    grid-template-columns: 1fr 100px 80px 180px 56px;
     align-items: center;
     gap: var(--sp-3);
-    padding: 6px 0;
+    padding: 4px 0;
     font-size: 13px;
   }
   .dir-path {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    text-align: left;
+    padding: 4px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .dir-path:hover {
+    background: var(--surface-2);
+    color: var(--accent);
+  }
+  .dir-ico {
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .row-act {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .row-act:hover {
+    background: var(--surface-2);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .col-fact {
+    width: 64px;
+    text-align: right;
+  }
+  .hint {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--text-muted);
+  }
+
+  /* 面包屑 */
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: var(--sp-4);
+    font-size: 13px;
+  }
+  .crumb {
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .crumb:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .crumb.active {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .crumb-sep {
+    color: var(--text-muted);
+  }
+  .crumb-loading {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: var(--sp-2);
+  }
+
+  /* 加载骨架 */
+  .scan-loading {
+    padding: var(--sp-4) 0;
+  }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    margin: 0 auto var(--sp-3);
+    border: 3px solid var(--surface-2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .skeleton-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: var(--sp-6);
+  }
+  .skeleton-row {
+    height: 16px;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 50%, var(--surface-2) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.3s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
   }
   .dir-size {
     text-align: right;

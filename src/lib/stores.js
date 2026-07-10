@@ -1,4 +1,4 @@
-import { writable } from "svelte/store";
+import { writable, get } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
 
@@ -183,4 +183,69 @@ export function startCleanupNotifications() {
     }
   }).then((u) => (un = u));
   return () => { if (un) un(); };
+}
+
+// ===== AI 助手：采集真实系统快照作为对话上下文 =====
+// 汇总当前 metrics、进程 TOP、磁盘容量，生成结构化文本供 LLM 参考。
+export async function collectSystemSnapshot() {
+  const m = get(metrics);
+  const io = get(diskIo);
+
+  let procs = [];
+  try {
+    procs = await invoke("get_processes");
+  } catch {}
+
+  let disk = get(diskReport);
+  if (!disk) {
+    try { disk = await loadDiskReport(); } catch {}
+  }
+
+  // CPU / 内存 TOP 5
+  const byCpu = [...procs].sort((a, b) => b.cpu - a.cpu).slice(0, 5);
+  const byMem = [...procs].sort((a, b) => b.mem_mb - a.mem_mb).slice(0, 5);
+
+  const lines = [];
+  lines.push("【系统实时指标】");
+  if (m) {
+    lines.push(`CPU 使用率: ${m.cpu?.toFixed(1)}%`);
+    lines.push(`内存: ${m.mem_used_gb?.toFixed(1)}/${m.mem_total_gb?.toFixed(1)} GB (${m.mem_load}%)`);
+    lines.push(`页面文件: ${m.mem_page_used_gb?.toFixed(1)}/${m.mem_page_total_gb?.toFixed(1)} GB`);
+    lines.push(`磁盘 I/O: 读 ${fmtBytesPerSec(m.disk_read_bps)} / 写 ${fmtBytesPerSec(m.disk_write_bps)}`);
+    lines.push(`网络吞吐: ${(m.net_total_bps * 8 / 1e6).toFixed(2)} Mbps`);
+  } else {
+    lines.push("(实时指标尚未就绪)");
+  }
+
+  lines.push("", `【进程总数】${procs.length}`);
+  lines.push("", "【CPU 占用 TOP 5】");
+  byCpu.forEach((p) => lines.push(`- ${p.name} (PID ${p.pid}): CPU ${p.cpu.toFixed(1)}%, 内存 ${p.mem_mb.toFixed(0)} MB, 线程 ${p.threads}`));
+  lines.push("", "【内存占用 TOP 5】");
+  byMem.forEach((p) => lines.push(`- ${p.name} (PID ${p.pid}): 内存 ${p.mem_mb.toFixed(0)} MB, CPU ${p.cpu.toFixed(1)}%`));
+
+  if (io?.rows?.length) {
+    lines.push("", "【磁盘 I/O TOP 5】");
+    io.rows.slice(0, 5).forEach((r) =>
+      lines.push(`- ${r.name} (PID ${r.pid}): 读 ${fmtBytesPerSec(r.read_bps)}, 写 ${fmtBytesPerSec(r.write_bps)}`)
+    );
+  }
+
+  if (disk?.volumes?.length) {
+    lines.push("", "【磁盘分区】");
+    disk.volumes.forEach((v) => {
+      const freeGb = (v.free / 1024 ** 3).toFixed(1);
+      const totalGb = (v.total / 1024 ** 3).toFixed(1);
+      lines.push(`- ${v.drive} ${v.label || ""}: 已用 ${v.used_pct?.toFixed(0)}%, 可用 ${freeGb}/${totalGb} GB`);
+    });
+  }
+
+  return lines.join("\n");
+}
+
+function fmtBytesPerSec(v) {
+  v = v || 0;
+  if (v < 1024) return v.toFixed(0) + " B/s";
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + " KB/s";
+  if (v < 1024 ** 3) return (v / 1024 ** 2).toFixed(1) + " MB/s";
+  return (v / 1024 ** 3).toFixed(1) + " GB/s";
 }
