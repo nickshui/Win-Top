@@ -110,7 +110,7 @@ Win-Top 是一款现代化的 Windows 资源管理工具，聚焦系统与应用
 | --- | --- |
 | `Win-Top_x.y.z_x64-setup.exe` | NSIS 安装包，推荐 |
 | `Win-Top_x.y.z_x64_en-US.msi` | MSI 安装包 |
-| `Win-Top_x.y.z_x64_portable.zip` | 绿色便携版，解压后直接运行 `Win-Top.exe`，免安装 |
+| `Win-Top_x.y.z_portable_x64.exe` | 绿色便携版，免安装，下载后双击即用 |
 
 **系统要求**：Windows 10 1809+ / Windows 11，x64；依赖 WebView2 运行时（Windows 11 自带；使用安装包时若缺失会自动引导安装）。
 
