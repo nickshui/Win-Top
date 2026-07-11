@@ -6,6 +6,11 @@
 
   let tab = "overview";
 
+  function selectTab(next) {
+    tab = next;
+    if (next === "analyzer") analyzerVisited = true;
+  }
+
   // ===== Volume + Disk (existing) =====
   let volumes = [];
   let disks = [];
@@ -50,11 +55,18 @@
   let scanLoading = false;
   let scanResult = null;
   let scanError = null;
+  let cancelRequested = false;
 
-  // 默认选中系统盘（或第一个固定盘）
-  $: if (!scanDrive && volumes.length > 0) {
+  let analyzerVisited = false;
+  let autoScanStarted = false;
+
+  // 首次进入"空间分析"标签时自动扫描默认盘（系统盘优先）。此前这里只是把
+  // scanDrive 设成 "C:" 却从未真正调用扫描，导致默认停在一个看起来已选中
+  // C 盘、实际从未扫描过的空白页——本盘的分析永远不会自己出现。
+  $: if (analyzerVisited && !autoScanStarted && volumes.length > 0) {
+    autoScanStarted = true;
     const sys = volumes.find((v) => v.drive?.toUpperCase().startsWith("C")) ?? volumes[0];
-    scanDrive = sys.drive;
+    scanVolume(sys.drive);
   }
 
   async function scanVolume(drive) {
@@ -62,6 +74,7 @@
     scanLoading = true;
     scanResult = null;
     scanError = null;
+    cancelRequested = false;
     resetDrill();
     try {
       scanResult = await invoke("scan_volume", { drive, topN: 50 });
@@ -74,6 +87,22 @@
     } finally {
       scanLoading = false;
     }
+  }
+
+  // 手动（重新）扫描当前盘：会重置下钻栈，回到整卷视图。
+  function rescan() {
+    if (scanLoading || !scanDrive) return;
+    scanVolume(scanDrive);
+  }
+
+  // 取消正在进行的扫描（整卷或下钻）。后端会在下一个检查点尽快停止，
+  // 返回取消前已收集到的部分结果，不会报错。
+  async function cancelScan() {
+    if (cancelRequested) return;
+    cancelRequested = true;
+    try {
+      await invoke("cancel_scan");
+    } catch {}
   }
 
   const srcLabel = (s) => (s === "mft" ? "MFT 极速扫描" : "逐目录扫描");
@@ -111,6 +140,7 @@
   async function drillInto(rawPath) {
     const abs = absPath(rawPath);
     drillLoading = true;
+    cancelRequested = false;
     try {
       const res = await invoke("scan_directory", { dirPath: abs, topN: 50 });
       drillStack = [...drillStack, { path: abs, result: res }];
@@ -161,8 +191,8 @@
 </script>
 
 <div class="tabs" role="tablist">
-  <button class="tab" class:active={tab === "overview"} on:click={() => (tab = "overview")} role="tab" aria-selected={tab === "overview"}>磁盘概况</button>
-  <button class="tab" class:active={tab === "analyzer"} on:click={() => (tab = "analyzer")} role="tab" aria-selected={tab === "analyzer"}>空间分析</button>
+  <button class="tab" class:active={tab === "overview"} on:click={() => selectTab("overview")} role="tab" aria-selected={tab === "overview"}>磁盘概况</button>
+  <button class="tab" class:active={tab === "analyzer"} on:click={() => selectTab("analyzer")} role="tab" aria-selected={tab === "analyzer"}>空间分析</button>
 </div>
 
 {#if tab === "overview"}
@@ -253,7 +283,14 @@
     {#if scanLoading}
       <div class="scan-loading">
         <div class="spinner"></div>
-        <p class="scan-status">正在扫描 {scanDrive} 整盘，首次读取 MFT 需管理员权限…</p>
+        <p class="scan-status">
+          {cancelRequested ? "正在停止扫描…" : `正在扫描 ${scanDrive} 整盘，首次读取 MFT 需管理员权限…`}
+        </p>
+        <div class="scan-loading-actions">
+          <button class="ghost" on:click={cancelScan} disabled={cancelRequested}>
+            {cancelRequested ? "正在停止…" : "取消扫描"}
+          </button>
+        </div>
         <div class="skeleton-list">
           {#each Array(6) as _}
             <div class="skeleton-row"></div>
@@ -267,13 +304,20 @@
     {/if}
 
     {#if scanResult && !scanLoading}
-      <div class="scan-summary">
-        <div class="sum-item"><span class="sum-val mono">{fmtCount(scanResult.scanned)}</span><span class="sum-label">已扫描文件</span></div>
-        <div class="sum-item"><span class="sum-val mono">{(scanResult.elapsed_ms / 1000).toFixed(2)}s</span><span class="sum-label">耗时</span></div>
-        <div class="sum-item"><span class="sum-val src-tag" class:mft={scanResult.source === "mft"}>{srcLabel(scanResult.source)}</span><span class="sum-label">扫描方式</span></div>
-        {#if scanResult.errors > 0}
-          <div class="sum-item"><span class="sum-val mono danger-text">{scanResult.errors}</span><span class="sum-label">无法访问</span></div>
-        {/if}
+      {#if activeResult?.cancelled}
+        <div class="note-box warn">扫描已手动取消，以下为取消前已收集到的部分结果。</div>
+      {/if}
+
+      <div class="scan-summary-row">
+        <div class="scan-summary">
+          <div class="sum-item"><span class="sum-val mono">{fmtCount(scanResult.scanned)}</span><span class="sum-label">已扫描文件</span></div>
+          <div class="sum-item"><span class="sum-val mono">{(scanResult.elapsed_ms / 1000).toFixed(2)}s</span><span class="sum-label">耗时</span></div>
+          <div class="sum-item"><span class="sum-val src-tag" class:mft={scanResult.source === "mft"}>{srcLabel(scanResult.source)}</span><span class="sum-label">扫描方式</span></div>
+          {#if scanResult.errors > 0}
+            <div class="sum-item"><span class="sum-val mono danger-text">{scanResult.errors}</span><span class="sum-label">无法访问</span></div>
+          {/if}
+        </div>
+        <button class="ghost" on:click={rescan}>重新扫描</button>
       </div>
 
       <!-- 面包屑：整卷 → 下钻路径 -->
@@ -287,7 +331,12 @@
             {d.path.split(/[\\/]/).filter(Boolean).pop() || d.path}
           </button>
         {/each}
-        {#if drillLoading}<span class="crumb-loading">下钻中…</span>{/if}
+        {#if drillLoading}
+          <span class="crumb-loading">
+            {cancelRequested ? "正在停止…" : "下钻中…"}
+            <button class="crumb-cancel" on:click={cancelScan} disabled={cancelRequested}>取消</button>
+          </span>
+        {/if}
       </div>
 
       {#if activeResult?.dirs?.length > 0}
@@ -601,8 +650,13 @@
   .scan-status {
     color: var(--text-muted);
     font-size: 14px;
-    padding: var(--sp-6);
+    padding: var(--sp-6) var(--sp-6) 0;
     text-align: center;
+  }
+  .scan-loading-actions {
+    display: flex;
+    justify-content: center;
+    padding-bottom: var(--sp-4);
   }
   .note {
     padding: var(--sp-3);
@@ -614,10 +668,16 @@
     color: #fcd34d;
   }
 
+  .scan-summary-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    margin-bottom: var(--sp-6);
+  }
   .scan-summary {
     display: flex;
     gap: var(--sp-8);
-    margin-bottom: var(--sp-6);
   }
   .sum-item {
     display: flex;
@@ -756,6 +816,24 @@
     font-size: 11px;
     color: var(--text-muted);
     margin-left: var(--sp-2);
+  }
+  .crumb-cancel {
+    border: none;
+    background: transparent;
+    color: var(--danger);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 2px 8px;
+    margin-left: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .crumb-cancel:hover {
+    background: rgba(239, 68, 68, 0.12);
+  }
+  .crumb-cancel:disabled {
+    opacity: 0.6;
+    cursor: default;
   }
 
   /* 加载骨架 */

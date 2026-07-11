@@ -7,10 +7,10 @@
   export const items = [
     { id: "overview", label: "概览", icon: "gauge" },
     { id: "process", label: "进程管理", icon: "cpu" },
-    { id: "events", label: "实时事件", icon: "activity" },
+    { id: "toolbox", label: "优化加速", icon: "terminal" },
     { id: "network", label: "网络与端口", icon: "network" },
     { id: "disk", label: "磁盘管理", icon: "harddrive" },
-    { id: "toolbox", label: "优化加速", icon: "terminal" },
+    { id: "events", label: "实时事件", icon: "activity" },
     { id: "tools", label: "系统工具", icon: "wrench" },
     { id: "ai", label: "AI 助手", icon: "sparkles" },
     { id: "about", label: "关于", icon: "info" },

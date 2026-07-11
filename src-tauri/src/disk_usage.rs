@@ -4,9 +4,28 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
+
+/// 全局扫描取消标志。空间分析同一时刻只会有一个扫描在跑（整卷或下钻），
+/// 用进程级标志就足够满足"用户点取消→尽快停止"的需求，无需按扫描实例区分。
+static SCAN_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// 每次发起新扫描前调用，清掉上一次可能残留的取消标志。
+pub fn reset_cancel() {
+    SCAN_CANCELLED.store(false, Ordering::Relaxed);
+}
+
+/// 前端"取消扫描"调用：请求正在运行的扫描尽快停止。
+pub fn request_cancel() {
+    SCAN_CANCELLED.store(true, Ordering::Relaxed);
+}
+
+pub fn is_cancelled() -> bool {
+    SCAN_CANCELLED.load(Ordering::Relaxed)
+}
 
 #[derive(Serialize)]
 pub struct LargeFile {
@@ -32,6 +51,9 @@ pub struct UsageReport {
     pub source: String, // "mft" | "walk"
     #[serde(default)]
     pub elapsed_ms: u64,
+    /// 是否因用户取消而提前结束（此时其余字段为取消前的部分结果）。
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 /// 扫描 dir_path，收集最大的 top_n 个文件，并统计直接子目录的体积。
@@ -47,6 +69,7 @@ pub fn scan_directory(dir_path: String, top_n: usize) -> UsageReport {
             errors: 0,
             source: "walk".into(),
             elapsed_ms: 0,
+            cancelled: false,
         };
     }
 
@@ -54,9 +77,10 @@ pub fn scan_directory(dir_path: String, top_n: usize) -> UsageReport {
     let mut dir_map: HashMap<String, (u64, u64)> = HashMap::new();
     let mut scanned = 0u64;
     let mut errors = 0u64;
+    let mut cancelled = false;
 
     collect(
-        &root, &root, 0, 8, &mut files, &mut dir_map, &mut scanned, &mut errors,
+        &root, &root, 0, 8, &mut files, &mut dir_map, &mut scanned, &mut errors, &mut cancelled,
     );
 
     // Sort files by size descending, take top_n
@@ -81,6 +105,7 @@ pub fn scan_directory(dir_path: String, top_n: usize) -> UsageReport {
         errors,
         source: "walk".into(),
         elapsed_ms: started.elapsed().as_millis() as u64,
+        cancelled,
     }
 }
 
@@ -93,7 +118,11 @@ fn collect(
     dirs: &mut HashMap<String, (u64, u64)>,
     scanned: &mut u64,
     errors: &mut u64,
+    cancelled: &mut bool,
 ) {
+    if *cancelled {
+        return;
+    }
     if depth > max_depth {
         return;
     }
@@ -105,6 +134,10 @@ fn collect(
         }
     };
     for entry in rd.flatten() {
+        if is_cancelled() {
+            *cancelled = true;
+            return;
+        }
         let p = entry.path();
         *scanned += 1;
         let md = match entry.metadata() {
@@ -118,7 +151,10 @@ fn collect(
             continue;
         }
         if md.is_dir() {
-            collect(root, &p, depth + 1, max_depth, files, dirs, scanned, errors);
+            collect(root, &p, depth + 1, max_depth, files, dirs, scanned, errors, cancelled);
+            if *cancelled {
+                return;
+            }
         } else {
             let sz = md.len();
             let modified = md

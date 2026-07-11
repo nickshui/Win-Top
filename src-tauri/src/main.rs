@@ -134,6 +134,7 @@ fn get_disk_report() -> disk::DiskReport {
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn scan_directory(dir_path: String, top_n: usize) -> disk_usage::UsageReport {
+    disk_usage::reset_cancel();
     tauri::async_runtime::spawn_blocking(move || disk_usage::scan_directory(dir_path, top_n))
         .await
         .unwrap_or_else(|_| disk_usage::UsageReport {
@@ -143,6 +144,7 @@ async fn scan_directory(dir_path: String, top_n: usize) -> disk_usage::UsageRepo
             errors: 0,
             source: "walk".into(),
             elapsed_ms: 0,
+            cancelled: false,
         })
 }
 
@@ -150,6 +152,7 @@ async fn scan_directory(dir_path: String, top_n: usize) -> disk_usage::UsageRepo
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn scan_volume(drive: String, top_n: usize) -> disk_usage::UsageReport {
+    disk_usage::reset_cancel();
     tauri::async_runtime::spawn_blocking(move || {
         match mft_scan::scan_volume(&drive, top_n) {
             Ok(report) => report,
@@ -168,7 +171,16 @@ async fn scan_volume(drive: String, top_n: usize) -> disk_usage::UsageReport {
         errors: 0,
         source: "walk".into(),
         elapsed_ms: 0,
+        cancelled: false,
     })
+}
+
+/// 请求取消正在进行的空间分析扫描（整卷或下钻）。
+/// 扫描线程会在下一个检查点尽快停止，并返回取消前已收集到的部分结果。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn cancel_scan() {
+    disk_usage::request_cancel();
 }
 
 #[cfg(target_os = "windows")]
@@ -385,6 +397,7 @@ fn main() {
             get_disk_report,
             scan_directory,
             scan_volume,
+            cancel_scan,
             network_checkup,
             probe_target,
             speed_test,

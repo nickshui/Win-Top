@@ -157,8 +157,13 @@ fn scan_volume_inner(handle: HANDLE, top_n: usize) -> Result<disk_usage::UsageRe
 
     // 预分配容量
     let mut all_entries: Vec<MftEntry> = Vec::with_capacity((num_records as usize / 4).max(1000));
+    let mut cancelled = false;
 
     for frn in 0..num_records {
+        if disk_usage::is_cancelled() {
+            cancelled = true;
+            break;
+        }
         match read_one_record(handle, frn, mft_record_size, bytes_per_sector) {
             Ok(Some(mut ents)) => all_entries.append(&mut ents),
             Ok(None) => {}
@@ -168,11 +173,16 @@ fn scan_volume_inner(handle: HANDLE, top_n: usize) -> Result<disk_usage::UsageRe
         }
     }
 
-    if all_entries.is_empty() {
+    // 注意：取消发生在尚未收集到任何条目时也应正常返回（部分/空结果），
+    // 不能落入下面的 Err 分支——否则调用方会把"用户主动取消"误判为
+    // "MFT 扫描失败"，进而回退到更慢的逐目录遍历，适得其反。
+    if all_entries.is_empty() && !cancelled {
         return Err("未能读取任何有效的 MFT 记录。".to_string());
     }
 
-    Ok(aggregate(all_entries, top_n))
+    let mut report = aggregate(all_entries, top_n);
+    report.cancelled = cancelled;
+    Ok(report)
 }
 
 // ─── 辅助：路径规范化 ─────────────────────────────────────────────────
@@ -629,6 +639,7 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
         errors: 0,
         source: "mft".into(),
         elapsed_ms: 0,
+        cancelled: false,
     }
 }
 
