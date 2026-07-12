@@ -52,6 +52,16 @@ mod health_check;
 mod services;
 #[cfg(target_os = "windows")]
 mod visual_effects;
+#[cfg(target_os = "windows")]
+mod app_inventory;
+#[cfg(target_os = "windows")]
+mod footprint;
+#[cfg(target_os = "windows")]
+mod usage_stats;
+#[cfg(target_os = "windows")]
+mod app_score;
+#[cfg(target_os = "windows")]
+mod uninstall;
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -370,6 +380,54 @@ async fn restore_visual_fx() -> Result<String, String> {
 }
 
 #[cfg(target_os = "windows")]
+#[tauri::command]
+async fn list_installed_apps() -> Vec<app_inventory::AppEntry> {
+    tauri::async_runtime::spawn_blocking(app_inventory::list_installed_apps)
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn resolve_footprint(app_id: String) -> Result<footprint::Footprint, String> {
+    tauri::async_runtime::spawn_blocking(move || footprint::resolve_by_id(&app_id))
+        .await
+        .unwrap_or_else(|_| Err("产物解析任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn list_apps_scored() -> Vec<app_score::ScoredApp> {
+    tauri::async_runtime::spawn_blocking(app_score::list_scored)
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn run_uninstaller(app_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || uninstall::run_uninstaller(&app_id))
+        .await
+        .unwrap_or_else(|_| Err("启动卸载程序任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn remove_residue(app_id: String, targets: Vec<String>) -> uninstall::RemovalResult {
+    tauri::async_runtime::spawn_blocking(move || uninstall::remove_residue(&app_id, targets))
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn undo_removal(undo_token: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || uninstall::undo_removal(&undo_token))
+        .await
+        .unwrap_or_else(|_| Err("撤销任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -430,7 +488,13 @@ fn main() {
             list_modified_services,
             get_visual_fx_state,
             apply_visual_fx_preset,
-            restore_visual_fx
+            restore_visual_fx,
+            list_installed_apps,
+            resolve_footprint,
+            list_apps_scored,
+            run_uninstaller,
+            remove_residue,
+            undo_removal
         ])
         .run(tauri::generate_context!())
         .expect("error while running Win-Top");

@@ -11,6 +11,7 @@
   import About from "./lib/views/About.svelte";
   import Placeholder from "./lib/views/Placeholder.svelte";
   import Optimize from "./lib/views/Optimize.svelte";
+  import Uninstall from "./lib/views/Uninstall.svelte";
   import Tools from "./lib/views/Tools.svelte";
   import Assistant from "./lib/views/Assistant.svelte";
   import Toast from "./lib/components/Toast.svelte";
@@ -60,6 +61,7 @@
       icon: "terminal",
       plan: "命令卡片参数化，长任务异步流式输出，需管理员的操作走按需提权。",
     },
+    uninstall: { title: "软件卸载", icon: "package" },
     tools: { title: "系统工具", icon: "wrench" },
     ai: {
       title: "AI 助手",
@@ -73,7 +75,7 @@
 <div class="shell">
   <Sidebar {current} onSelect={(id) => (current = id)} />
   <div class="main">
-    <TopBar title={meta[current].title} />
+    <TopBar title={meta[current]?.title ?? ""} />
     <div class="view">
       {#if current === "overview"}
         <Overview />
@@ -87,6 +89,8 @@
         <Disk />
       {:else if current === "toolbox"}
         <Optimize navigate={(id) => (current = id)} />
+      {:else if current === "uninstall"}
+        <Uninstall />
       {:else if current === "tools"}
         <Tools />
       {:else if current === "ai"}

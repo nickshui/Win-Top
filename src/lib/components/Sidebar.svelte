@@ -8,6 +8,7 @@
     { id: "overview", label: "概览", icon: "gauge" },
     { id: "process", label: "进程管理", icon: "cpu" },
     { id: "toolbox", label: "优化加速", icon: "terminal" },
+    { id: "uninstall", label: "软件卸载", icon: "package" },
     { id: "network", label: "网络与端口", icon: "network" },
     { id: "disk", label: "磁盘管理", icon: "harddrive" },
     { id: "events", label: "实时事件", icon: "activity" },
