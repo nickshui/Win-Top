@@ -17,6 +17,8 @@ windows = { version = "0.58", features = [
   "Win32_System_Performance",
   "Win32_System_SystemInformation",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ApplicationInstallationAndServicing",
+  "Win32_System_Registry",
 ] }
 netstat2 = "0.9"
 ferrisetw = "1"
@@ -34,3 +36,11 @@ path = "src/bin/disktemp.rs"
 [[bin]]
 name = "nettraffic"
 path = "src/bin/nettraffic.rs"
+
+[[bin]]
+name = "msiscan"
+path = "src/bin/msiscan.rs"
+
+[[bin]]
+name = "userassist"
+path = "src/bin/userassist.rs"
