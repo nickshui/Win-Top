@@ -69,6 +69,79 @@ fn split_command(cmd: &str) -> (String, String) {
     (c.to_string(), String::new())
 }
 
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub enum UninstallMode {
+    Interactive,
+    Quiet,
+    Unavailable,
+}
+
+#[derive(Serialize, Debug)]
+pub struct UninstallCapability {
+    pub mode: UninstallMode,
+    pub message: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SelectedCommand {
+    exe: String,
+    params: String,
+    mode: UninstallMode,
+}
+
+fn capability_for(app: &app_inventory::AppEntry) -> UninstallCapability {
+    if !app.uninstall_string.is_empty() || (app.is_msi && !app.product_code.is_empty()) {
+        UninstallCapability {
+            mode: UninstallMode::Interactive,
+            message: "将打开厂商卸载器，由你确认卸载选项。".into(),
+        }
+    } else if !app.quiet_uninstall_string.is_empty() {
+        UninstallCapability {
+            mode: UninstallMode::Quiet,
+            message: "该应用只提供静默卸载，确认后可能不显示厂商界面。".into(),
+        }
+    } else {
+        UninstallCapability {
+            mode: UninstallMode::Unavailable,
+            message: "该应用没有可用的卸载命令。".into(),
+        }
+    }
+}
+
+fn select_uninstall_command(
+    app: &app_inventory::AppEntry,
+    allow_quiet: bool,
+) -> Result<SelectedCommand, String> {
+    if !app.uninstall_string.is_empty() {
+        let (exe, params) = split_command(&app.uninstall_string);
+        return Ok(SelectedCommand {
+            exe,
+            params,
+            mode: UninstallMode::Interactive,
+        });
+    }
+    if app.is_msi && !app.product_code.is_empty() {
+        return Ok(SelectedCommand {
+            exe: "msiexec.exe".into(),
+            params: format!("/x {}", app.product_code),
+            mode: UninstallMode::Interactive,
+        });
+    }
+    if !app.quiet_uninstall_string.is_empty() {
+        if !allow_quiet {
+            return Err("该应用只提供静默卸载，需要明确确认".into());
+        }
+        let (exe, params) = split_command(&app.quiet_uninstall_string);
+        return Ok(SelectedCommand {
+            exe,
+            params,
+            mode: UninstallMode::Quiet,
+        });
+    }
+    Err("该应用没有可用的卸载命令（僵尸条目）".into())
+}
+
 fn launch(exe: &str, params: &str) -> Result<String, String> {
     let exe_w: Vec<u16> = exe.encode_utf16().chain(once(0)).collect();
     let par_w: Vec<u16> = params.encode_utf16().chain(once(0)).collect();
@@ -92,27 +165,40 @@ fn launch(exe: &str, params: &str) -> Result<String, String> {
     if (r.0 as isize) <= 32 {
         Err("启动卸载程序失败（可能被 UAC 取消或命令无效）".into())
     } else {
-        Ok("已启动卸载程序；完成后点「重新扫描产物」查看残留".into())
+        Ok("已启动卸载程序，正在等待系统确认卸载结果".into())
     }
 }
 
-/// 运行某应用的厂商卸载器（不等待 GUI 卸载器退出）。
-pub fn run_uninstaller(app_id: &str) -> Result<String, String> {
+pub fn uninstall_capability(app_id: &str) -> Result<UninstallCapability, String> {
     let app = app_inventory::list_installed_apps()
         .into_iter()
         .find(|a| a.id == app_id)
         .ok_or_else(|| "未找到应用".to_string())?;
+    Ok(capability_for(&app))
+}
 
-    let (exe, params) = if !app.quiet_uninstall_string.is_empty() {
-        split_command(&app.quiet_uninstall_string)
-    } else if !app.uninstall_string.is_empty() {
-        split_command(&app.uninstall_string)
-    } else if app.is_msi && !app.product_code.is_empty() {
-        ("msiexec.exe".to_string(), format!("/x {}", app.product_code))
+/// 运行某应用的厂商卸载器（不等待 GUI 卸载器退出）。
+pub fn start_uninstaller(app_id: &str, allow_quiet: bool) -> Result<String, String> {
+    let app = app_inventory::list_installed_apps()
+        .into_iter()
+        .find(|a| a.id == app_id)
+        .ok_or_else(|| "未找到应用".to_string())?;
+    let selected = select_uninstall_command(&app, allow_quiet)?;
+    launch(&selected.exe, &selected.params)
+}
+
+pub fn is_app_installed(app_id: &str) -> bool {
+    app_inventory::list_installed_apps()
+        .iter()
+        .any(|app| app.id == app_id)
+}
+
+fn ensure_app_removed(installed: bool) -> Result<(), &'static str> {
+    if installed {
+        Err("应用仍处于安装状态，不能清理产物")
     } else {
-        return Err("该应用没有可用的卸载命令（僵尸条目）。v1 暂不支持强制卸载。".into());
-    };
-    launch(&exe, &params)
+        Ok(())
+    }
 }
 
 // ─── 安全闸 ───────────────────────────────────────────────────────────
@@ -206,6 +292,14 @@ fn reg_import(file: &Path) -> bool {
 /// 删除用户确认的残留（文件/目录 -> 隔离区；注册表键 -> 导出后删除）。可用 undo_token 撤销。
 pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
     let mut warnings = Vec::new();
+
+    if let Err(message) = ensure_app_removed(is_app_installed(app_id)) {
+        return RemovalResult {
+            skipped: targets.len() as u32,
+            warnings: vec![message.into()],
+            ..Default::default()
+        };
+    }
 
     // 后端独立重解析（绝不信任前端路径）
     let fp = match footprint::resolve_by_id(app_id) {
@@ -365,6 +459,25 @@ pub fn undo_removal(undo_token: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    fn test_app(uninstall: &str, quiet: &str, is_msi: bool, product_code: &str) -> app_inventory::AppEntry {
+        app_inventory::AppEntry {
+            id: "HKLM|test".into(),
+            name: "Test App".into(),
+            publisher: "Test Publisher".into(),
+            version: "1.0".into(),
+            install_date: String::new(),
+            install_location: String::new(),
+            estimated_size_kb: 0,
+            uninstall_string: uninstall.into(),
+            quiet_uninstall_string: quiet.into(),
+            display_icon: String::new(),
+            is_msi,
+            product_code: product_code.into(),
+            arch: "x64".into(),
+            source: "HKLM".into(),
+        }
+    }
+
     #[test]
     fn command_splitting() {
         assert_eq!(
@@ -379,6 +492,42 @@ mod tests {
             split_command("C:\\App\\unins000.exe"),
             ("C:\\App\\unins000.exe".into(), String::new())
         );
+    }
+
+    #[test]
+    fn interactive_command_wins_over_quiet() {
+        let app = test_app("normal.exe /remove", "quiet.exe /S", false, "");
+        let selected = select_uninstall_command(&app, false).unwrap();
+        assert_eq!(selected.exe, "normal.exe");
+        assert_eq!(selected.mode, UninstallMode::Interactive);
+    }
+
+    #[test]
+    fn quiet_only_requires_explicit_permission() {
+        let app = test_app("", "quiet.exe /S", false, "");
+        assert!(select_uninstall_command(&app, false).is_err());
+        assert_eq!(
+            select_uninstall_command(&app, true).unwrap().mode,
+            UninstallMode::Quiet
+        );
+    }
+
+    #[test]
+    fn msi_fallback_is_interactive() {
+        let app = test_app("", "", true, "{PRODUCT-CODE}");
+        let selected = select_uninstall_command(&app, false).unwrap();
+        assert_eq!(selected.exe.to_lowercase(), "msiexec.exe");
+        assert_eq!(selected.params, "/x {PRODUCT-CODE}");
+        assert_eq!(selected.mode, UninstallMode::Interactive);
+    }
+
+    #[test]
+    fn installed_app_cleanup_is_rejected() {
+        assert_eq!(
+            ensure_app_removed(true),
+            Err("应用仍处于安装状态，不能清理产物")
+        );
+        assert!(ensure_app_removed(false).is_ok());
     }
 
     #[test]

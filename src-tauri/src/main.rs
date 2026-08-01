@@ -405,10 +405,28 @@ async fn list_apps_scored() -> Vec<app_score::ScoredApp> {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn run_uninstaller(app_id: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || uninstall::run_uninstaller(&app_id))
+async fn uninstall_capability(app_id: String) -> Result<uninstall::UninstallCapability, String> {
+    tauri::async_runtime::spawn_blocking(move || uninstall::uninstall_capability(&app_id))
+        .await
+        .unwrap_or_else(|_| Err("读取卸载能力任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn start_uninstaller(app_id: String, allow_quiet: bool) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall::start_uninstaller(&app_id, allow_quiet)
+    })
         .await
         .unwrap_or_else(|_| Err("启动卸载程序任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn is_app_installed(app_id: String) -> bool {
+    tauri::async_runtime::spawn_blocking(move || uninstall::is_app_installed(&app_id))
+        .await
+        .unwrap_or(true)
 }
 
 #[cfg(target_os = "windows")]
@@ -492,7 +510,9 @@ fn main() {
             list_installed_apps,
             resolve_footprint,
             list_apps_scored,
-            run_uninstaller,
+            uninstall_capability,
+            start_uninstaller,
+            is_app_installed,
             remove_residue,
             undo_removal
         ])

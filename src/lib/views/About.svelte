@@ -1,9 +1,10 @@
 <script>
   import { open } from "@tauri-apps/api/shell";
   import Icon from "../components/Icon.svelte";
+  import packageInfo from "../../../package.json";
 
   const PROJECT_URL = "https://github.com/nickshui/Win-Top";
-  const VERSION = "0.1.0";
+  const VERSION = packageInfo.version;
 
   const recommendations = [
     {

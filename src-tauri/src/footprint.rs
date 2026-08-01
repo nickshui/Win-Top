@@ -130,7 +130,8 @@ const GENERIC: &[&str] = &[
     "group", "the", "app", "apps", "application", "data", "client", "desktop", "update",
     "updater", "helper", "service", "services", "common", "shared", "temp", "cache",
     "logs", "bin", "core", "tools", "tool", "setup", "install", "installer", "program",
-    "programs", "microsoft", "windows", "user", "users", "public",
+    "programs", "microsoft", "windows", "user", "users", "public", "game", "games",
+    "launcher",
 ];
 
 /// 只保留字母数字并小写（"CC Switch" -> "ccswitch"）。
@@ -172,7 +173,7 @@ fn name_match(candidate: &str, id: &Identity) -> Option<(Confidence, String)> {
     // 与产品紧凑名相等 / 相关 —— 强匹配
     if !id.prod_compact.is_empty() && id.prod_compact.len() >= 4 {
         if cnorm == id.prod_compact {
-            return Some((Confidence::Medium, format!("目录名与产品名「{}」一致", candidate)));
+            return Some((Confidence::High, format!("目录名与完整产品名「{}」一致", candidate)));
         }
         // 候选名完整包含产品名作为前缀（如 "ccswitchsetup"）—— 仍算中等
         if cnorm.starts_with(&id.prod_compact) {
@@ -347,48 +348,146 @@ fn residue_fs_roots() -> Vec<PathBuf> {
     add("LOCALAPPDATA", "");
     add("LOCALAPPDATA", "Programs");
     add("PUBLIC", "");
+    add("PUBLIC", "Documents");
+    add("USERPROFILE", "Documents");
+    add("USERPROFILE", "Saved Games");
     v
 }
 
-fn scan_fs_residue(id: &Identity, known: &[PathBuf], out: &mut Vec<Artifact>) {
-    let known_lower: Vec<String> = known.iter().map(|p| p.to_string_lossy().to_lowercase()).collect();
-    for root in residue_fs_roots() {
-        let rd = match fs::read_dir(&root) {
-            Ok(r) => r,
+fn add_fs_artifact(
+    path: &Path,
+    confidence: Confidence,
+    reason: String,
+    known_lower: &[String],
+    out: &mut Vec<Artifact>,
+) -> bool {
+    let path_str = path.to_string_lossy().to_string();
+    let path_lower = path_str.to_lowercase();
+    // 安装目录本身、其子目录以及只用于容纳安装目录的父目录，都不重复计为应用数据。
+    if known_lower
+        .iter()
+        .any(|known| is_under(known, &path_lower) || is_under(&path_lower, known))
+    {
+        return false;
+    }
+    if out.iter().any(|item| item.path.eq_ignore_ascii_case(&path_str)) {
+        return false;
+    }
+    out.push(Artifact {
+        size: dir_size(path),
+        category: classify(&path_str),
+        path: path_str,
+        kind: ArtifactKind::Dir,
+        confidence,
+        source: "residue-fs".into(),
+        reversible: true,
+        match_reason: reason,
+    });
+    true
+}
+
+fn scan_fs_root(root: &Path, id: &Identity, known_lower: &[String], out: &mut Vec<Artifact>) {
+    let rd = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(value) => value,
             Err(_) => continue,
         };
-        for e in rd.flatten() {
-            let md = match e.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-            if !md.is_dir() {
-                continue;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        let direct_name = entry.file_name().to_string_lossy().to_string();
+        let direct_match = name_match(&direct_name, id);
+        if matches!(direct_match, Some((Confidence::High, _))) {
+            if let Some((confidence, reason)) = direct_match {
+                add_fs_artifact(&path, confidence, reason, known_lower, out);
             }
-            let path = e.path();
-            let path_str = path.to_string_lossy().to_string();
-            // 已在安装目录内的，不重复计为残留
-            if known_lower.iter().any(|k| is_under(k, &path_str.to_lowercase())) {
-                continue;
+            continue;
+        }
+
+        // 发行商共享目录很常见。只多看一层目录名，并优先报告更具体的产品目录；
+        // 不读取无关文件内容，也不对未匹配目录计算体积。
+        let mut nested_found = false;
+        if let Ok(children) = fs::read_dir(&path) {
+            for child in children.flatten() {
+                let child_path = child.path();
+                let child_meta = match fs::symlink_metadata(&child_path) {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                };
+                if !child_meta.is_dir() || child_meta.file_type().is_symlink() {
+                    continue;
+                }
+                let child_name = child.file_name().to_string_lossy().to_string();
+                if let Some((confidence, reason)) = name_match(&child_name, id) {
+                    if confidence != Confidence::Low
+                        && add_fs_artifact(
+                            &child_path,
+                            confidence,
+                            format!("位于「{}」目录下；{}", direct_name, reason),
+                            known_lower,
+                            out,
+                        )
+                    {
+                        nested_found = true;
+                    }
+                }
             }
-            let dname = e.file_name().to_string_lossy().to_string();
-            if let Some((conf, reason)) = name_match(&dname, id) {
-                out.push(Artifact {
-                    size: dir_size(&path),
-                    category: classify(&path_str),
-                    path: path_str,
-                    kind: ArtifactKind::Dir,
-                    confidence: conf,
-                    source: "residue-fs".into(),
-                    reversible: true,
-                    match_reason: reason,
-                });
+        }
+        if !nested_found {
+            if let Some((confidence, reason)) = direct_match {
+                add_fs_artifact(&path, confidence, reason, known_lower, out);
             }
         }
     }
 }
 
+fn scan_fs_residue(id: &Identity, known: &[PathBuf], out: &mut Vec<Artifact>) {
+    let known_lower: Vec<String> = known
+        .iter()
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .collect();
+    for root in residue_fs_roots() {
+        scan_fs_root(&root, id, &known_lower, out);
+    }
+}
+
 // ─── 残留扫描：注册表 ─────────────────────────────────────────────────
+
+fn registry_candidate_paths(
+    parent: &str,
+    nested: &[String],
+    id: &Identity,
+) -> Vec<(String, Confidence, String)> {
+    let direct_match = name_match(parent, id);
+    if let Some((Confidence::High, reason)) = direct_match.as_ref() {
+        return vec![(parent.to_string(), Confidence::High, reason.clone())];
+    }
+
+    let mut matches = Vec::new();
+    for child in nested {
+        if let Some((confidence, reason)) = name_match(child, id) {
+            if confidence != Confidence::Low {
+                matches.push((
+                    format!("{}\\{}", parent, child),
+                    confidence,
+                    format!("位于注册表项「{}」下；{}", parent, reason),
+                ));
+            }
+        }
+    }
+    if matches.is_empty() {
+        if let Some((Confidence::Medium, reason)) = direct_match {
+            matches.push((parent.to_string(), Confidence::Medium, reason));
+        }
+    }
+    matches
+}
 
 fn scan_reg_residue(id: &Identity, out: &mut Vec<Artifact>) {
     let roots: [(HKEY, &str, &str); 3] = [
@@ -404,13 +503,21 @@ fn scan_reg_residue(id: &Identity, out: &mut Vec<Artifact>) {
                 continue;
             }
             for child in app_inventory::enum_subkey_names(hkey) {
-                if let Some((conf, reason)) = name_match(&child, id) {
-                    // 注册表残留只在"强匹配"时上报，降低误报（键名撞车比目录更常见）
-                    if conf == Confidence::Low {
-                        continue;
-                    }
+                if name_match(&child, id).is_none() {
+                    continue;
+                }
+                let mut nested = Vec::new();
+                let childw = app_inventory::to_wide(&child);
+                let mut child_key = HKEY::default();
+                if RegOpenKeyExW(hkey, PCWSTR(childw.as_ptr()), 0, KEY_READ, &mut child_key)
+                    == ERROR_SUCCESS
+                {
+                    nested = app_inventory::enum_subkey_names(child_key);
+                    let _ = RegCloseKey(child_key);
+                }
+                for (relative_path, conf, reason) in registry_candidate_paths(&child, &nested, id) {
                     out.push(Artifact {
-                        path: format!("{}\\{}", disp, child),
+                        path: format!("{}\\{}", disp, relative_path),
                         kind: ArtifactKind::RegKey,
                         category: Category::Config,
                         size: 0,
@@ -630,7 +737,8 @@ fn rescan_cached(app_id: &str) -> Option<Footprint> {
         warnings: cached.warnings.clone(),
         app_removed: true,
     };
-    cache_put(&fp);
+    // 保留卸载前的完整基线。若用清理后的空结果覆盖缓存，撤销恢复的产物
+    // 将无法在下一次复扫时被重新发现。
     Some(fp)
 }
 
@@ -684,9 +792,9 @@ mod tests {
     fn identity_and_matching() {
         let id = identity("CC Switch", "ccswitch");
         assert_eq!(id.prod_compact, "ccswitch");
-        // 精确/相关目录名 -> Medium
-        assert!(matches!(name_match("CC Switch", &id), Some((Confidence::Medium, _))));
-        assert!(matches!(name_match("ccswitch", &id), Some((Confidence::Medium, _))));
+        // 完整产品名精确匹配 -> High
+        assert!(matches!(name_match("CC Switch", &id), Some((Confidence::High, _))));
+        assert!(matches!(name_match("ccswitch", &id), Some((Confidence::High, _))));
         // 无关目录 -> None
         assert!(name_match("Google", &id).is_none());
         assert!(name_match("NVIDIA Corporation", &id).is_none());
@@ -699,7 +807,14 @@ mod tests {
         assert!(id.prod_tokens.contains(&"cockpit".to_string()));
         assert!(!id.prod_tokens.contains(&"tools".to_string()));
         assert!(name_match("Tools", &id).is_none());
-        assert!(matches!(name_match("Cockpit Tools", &id), Some((Confidence::Medium, _))));
+        assert!(matches!(name_match("Cockpit Tools", &id), Some((Confidence::High, _))));
+    }
+
+    #[test]
+    fn games_is_too_generic_to_match_other_vendors() {
+        let id = identity("Epic Games Launcher", "Epic Games, Inc.");
+        assert!(!id.prod_tokens.contains(&"games".to_string()));
+        assert!(name_match("Rockstar Games", &id).is_none());
     }
 
     #[test]
@@ -715,6 +830,83 @@ mod tests {
         assert!(is_under("C:\\App", "C:\\App"));
         assert!(!is_under("C:\\App", "C:\\Application\\x")); // 不能前缀误判
         assert!(!is_under("", "C:\\anything"));
+    }
+
+    #[test]
+    fn nested_product_dir_is_preferred_over_vendor_container() {
+        let root = std::env::temp_dir().join(format!("wintop-nested-scan-{}", std::process::id()));
+        let product = root.join("Vendor Suite").join("Test App");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&product).unwrap();
+        fs::write(product.join("data.bin"), [0u8; 16]).unwrap();
+
+        let mut artifacts = Vec::new();
+        scan_fs_root(&root, &identity("Test App", "Vendor Suite LLC"), &[], &mut artifacts);
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].path, product.to_string_lossy());
+        assert_eq!(artifacts[0].confidence, Confidence::High);
+        assert_eq!(artifacts[0].size, 16);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn common_user_data_roots_are_scanned() {
+        let profile = match std::env::var_os("USERPROFILE") {
+            Some(value) => PathBuf::from(value),
+            None => return,
+        };
+        let roots = residue_fs_roots();
+        assert!(roots.contains(&profile.join("Documents")));
+        assert!(roots.contains(&profile.join("Saved Games")));
+    }
+
+    #[test]
+    fn nested_registry_product_is_preferred_over_vendor_key() {
+        let id = identity("Test App", "Vendor Suite LLC");
+        let matches = registry_candidate_paths(
+            "Vendor Suite",
+            &["Shared".to_string(), "Test App".to_string()],
+            &id,
+        );
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, "Vendor Suite\\Test App");
+        assert_eq!(matches[0].1, Confidence::High);
+    }
+
+    #[test]
+    fn cached_baseline_survives_cleanup_and_restore() {
+        let root = std::env::temp_dir().join(format!("wintop-footprint-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let app_id = format!("test-cache-{}", std::process::id());
+        cache_put(&Footprint {
+            app_id: app_id.clone(),
+            app_name: "Cache Test".into(),
+            known_roots: vec![root.to_string_lossy().to_string()],
+            artifacts: vec![Artifact {
+                path: root.to_string_lossy().to_string(),
+                kind: ArtifactKind::Dir,
+                category: Category::Binary,
+                size: 0,
+                confidence: Confidence::High,
+                source: "install-dir".into(),
+                reversible: true,
+                match_reason: "测试安装目录".into(),
+            }],
+            total_size: 0,
+            high_conf_size: 0,
+            residue_size: 0,
+            warnings: Vec::new(),
+            app_removed: false,
+        });
+
+        assert_eq!(rescan_cached(&app_id).unwrap().artifacts.len(), 1);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(rescan_cached(&app_id).unwrap().artifacts.is_empty());
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(rescan_cached(&app_id).unwrap().artifacts.len(), 1);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:uninstall": "node --test src/lib/uninstallWorkflow.test.js"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.6.0"
