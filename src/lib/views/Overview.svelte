@@ -1,5 +1,5 @@
 <script>
-  import { onMount, afterUpdate } from "svelte";
+  import { onMount, onDestroy, afterUpdate } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
   import { metrics, cpuHistory, MAX_HISTORY, historyData, loadHistory, diskIo, gpuProc } from "../stores.js";
 
@@ -390,6 +390,24 @@
 
   onMount(() => {
     loadRange(activeRange);
+  });
+
+  // 图表历史上只在挂载时加载一次，带来两个问题：
+  //   1) 应用刚启动时后端内存环（history.rs）还不到 2 个点，那一次会取回空数组，
+  //      而此后没有任何定时器或事件会重新加载它 —— 于是 `{#if $historyData.length > 1}`
+  //      永远不成立，图表永久停在「该时间窗暂无足够数据」；
+  //   2) 停留在概览页时图表不随时间推进。
+  // 改为按窗口档位定时刷新：内存窗口（≤1 小时）5 秒一次；更长窗口走磁盘读取，60 秒一次。
+  // 定时器由 activeRange 驱动重挂，切换档位不会叠加。
+  let chartTimer = null;
+  function armChartTimer(n) {
+    if (chartTimer) clearInterval(chartTimer);
+    chartTimer = setInterval(() => loadRange(activeRange), n > 3600 ? 60000 : 5000);
+  }
+  $: armChartTimer(activeRange);
+
+  onDestroy(() => {
+    if (chartTimer) clearInterval(chartTimer);
   });
 </script>
 
