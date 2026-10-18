@@ -9,6 +9,20 @@ export function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
+// 用于把内容拼进 HTML 属性值（目前只有链接的 href）。
+//
+// 为什么不能复用 escapeHtml：escapeHtml 不处理引号（对文本节点够用），而放进属性里
+// 一个 `"` 就能闭合 href 并把剩下的内容变成新属性。这与 csp:null + allowlist:all
+// + withGlobalTauri 叠加，会把模型输出变成可执行的 DOM。
+//
+// 为什么不能直接对 url 调完整的属性转义：renderMarkdown 入口已经对整份源码做过
+// escapeHtml，url 里的 `&` 与 `<`/`>` 已经是实体。再转一次 `&` 会把
+// `?a=1&b=2` 变成 `?a=1&amp;amp;b=2`（链接失效）。
+// 因此这里**只补 escapeHtml 漏掉的那一项：引号**，不碰其它字符。
+export function escapeAttr(s) {
+  return String(s).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 // 用户消息：转义 + 换行转 <br/>
 export function renderUserText(text) {
   return escapeHtml(text).replace(/\n/g, "<br />");
@@ -27,10 +41,16 @@ function renderInline(s) {
     codes.push(c);
     return NUL + "CODE" + (codes.length - 1) + NUL;
   });
-  // 链接 [text](http...)，仅允许 http/https
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, txt, url) => {
-    return `<a href="${url}" target="_blank" rel="noopener noreferrer">${txt}</a>`;
-  });
+  // 链接 [text](http...)，仅允许 http/https。
+  // URL 字符类刻意排除 < > " ' 与反引号：这些在合法的 URL 里本就应当被百分号编码，
+  // 直接拒绝比"接受后再转义"更安全（也符合 CommonMark：目标里不允许引号与空白）。
+  // href 仍走 escapeAttr 作为第二道防线——若将来放宽这个字符类，属性也不会被逃出。
+  // txt 已经是 escapeHtml 后的内容（renderMarkdown 入口整体转义），保持原样。
+  t = t.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)"'`<>]+)\)/g,
+    (_, txt, url) =>
+      `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${txt}</a>`,
+  );
   t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
   // 还原行内代码
