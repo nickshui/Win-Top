@@ -3,63 +3,55 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%20x64-0078d4)
 ![Release](https://img.shields.io/github/v/release/nickshui/Win-Top)
 ![Tech](https://img.shields.io/badge/Tauri%20%2B%20Rust%20%2B%20Svelte-24292f)
+![Native](https://img.shields.io/badge/no%20subprocess-PDH%20%2F%20ETW%20%2F%20WMI%20%2F%20WinAPI-16a34a)
 
-Win-Top 是一款现代化的 Windows 资源管理工具，聚焦系统与应用资源的可视化监控与一键化管理，集成 AI 能力帮助用户理解系统状态并做出高效决策。它将网络、端口、进程、磁盘、CPU、内存等核心资源统一为一个可扩展的桌面端工作台，把复杂命令变成可理解、可重复的一键操作。
+**Win-Top 是一款 Windows 系统监控与资源管理工具。** 它把平时要开一堆工具才能看清的东西——进程与 GPU 占用、端口占用、磁盘空间、网络吞吐、开机启动项——收进一个桌面工作台，并提供 AI 辅助判断。
 
-**产品定位**：一体化 Windows 资源管理工作台——对开发者，是端口、进程、开发环境的效率工具；对普通用户，是一键化的"健康检查 + 修复建议"。
+所有数据**直调 Windows 原生接口**（PDH 性能计数器 / ETW / WMI / WinAPI），**不派生 `netstat`、`tasklist`、`powershell` 等任何子进程**；默认普通权限运行即可用，只有 ETW 实时事件与磁盘温度需要管理员。
+
+> 适用场景：任务管理器看不够细的时候（**每进程 GPU 占用与显存**、端口到底被谁占着、磁盘空间去哪了、开机为什么变慢）；也适合作为一台 Windows 机器的常驻健康看板。
 
 ---
 
-## 功能与界面
+## 功能一览
 
-### 概览
+| 模块 | 能做什么 |
+| --- | --- |
+| **概览** | CPU / 内存 / 页面文件 / 磁盘 I/O / 网络吞吐一屏总览；**独立 GPU 卡片（按显卡分页：总览 + 每张卡一个 Tab）**；进程磁盘 I/O TOP 5；可交互历史趋势图 |
+| **进程管理** | 全量进程列表 / 树形双视图；按名称或 PID 过滤；按 **CPU / 内存 / GPU / 显存** / 线程 / 磁盘读写排序；详情面板给出命令行、完整路径、句柄数、优先级、**GPU 逐卡分解**；行内结束进程或改优先级 |
+| **实时事件** | 基于 ETW 的进程启动 / 退出实时流（需管理员），支持按进程名过滤 |
+| **网络与端口** | 一键网络体检（本机 IP / 网关 / 公网 IP / 延迟 / DNS）；多路并发测速；连通性检测；**端口 → 进程 → PID** 映射与一键释放；基于 ETW 的每进程实时上下行速率 |
+| **磁盘管理** | 分区容量与使用率；物理磁盘 SMART 健康与温度（温度需管理员）；基于 NTFS MFT 的整卷空间分析，百万级文件数秒完成，支持逐级下钻 |
+| **优化加速** | 一键加速（垃圾清理 + 内存释放）；系统体检；8 类系统垃圾清理；开机启动项开关 |
+| **系统工具** | 防火墙规则查看与开关；系统还原点；文件占用解锁；系统快照导出（JSON / CSV） |
+| **AI 助手** | 接入任意 OpenAI 兼容接口（预置 8 家厂商）；每次提问自动附带真实系统快照，基于实测数据给建议，并优先引导使用软件内已有功能 |
 
-系统状态一屏总览：CPU 使用率（含 60 采样趋势曲线与状态评级）、内存与页面文件占用、磁盘读写速率、网络吞吐、进程磁盘 I/O TOP 5、系统负载综合评估。下方为可交互历史趋势图，支持 CPU / 内存 / 网络三条曲线与 1 分 / 5 分 / 15 分 / 1 小时时间窗切换。
+> 截图见 [`docs/screenshots/`](docs/screenshots/)。
 
-![概览](docs/screenshots/01-overview.png)
+---
 
-### 进程管理
+## GPU 监控（v0.1.6 新增）
 
-全量进程的列表 / 树形双视图，支持按名称 / PID 过滤，按 CPU、内存、线程、磁盘读写排序，刷新间隔可调（1s / 2s / 5s / 暂停，暂停后表格冻结便于操作）。点击行打开详情面板，展示命令行、完整路径、父进程 PID、句柄数、线程数、优先级；行内即可设置优先级或结束进程，危险操作二次确认。
+Windows 的 GPU 性能计数器按 **(进程, 显卡, 引擎)** 暴露实例，Win-Top 直接读这套数据，因此能做到任务管理器之外的粒度：
 
-![进程管理](docs/screenshots/02-processes.jpg)
+- **每进程 GPU 占用**：取「最忙引擎」口径（与任务管理器一致），并可展开看该进程在各张卡上的分解；
+- **每进程显存**：专用 / 共享分列，支持排序；
+- **概览 GPU 卡片**：一张总览 + 每张独立显卡一个 Tab，含各卡占用、引擎分解、专用/共享显存、该卡自己的进程 TOP 8；
+- **历史趋势**：GPU 曲线与 CPU / 内存 / 网络并列，时间窗 1 分 ~ 30 天。
 
-### 实时事件
+采集口径上有一处**必须说明**的地方：各进程的「专用显存」**不能相加**当作显卡占用。跨进程共享的画面显存会被同时记在每个持有它的进程名下——本机实测各进程相加 10.24 GiB，而显卡自身只报 5.02 GiB（`dwm.exe` 单个进程就报 5.72 GiB，比整卡还多）。显卡级占用一律读 `\GPU Adapter Memory(*)`，进程级才读 `\GPU Process Memory(*)`。
 
-基于 ETW 的进程启动 / 退出实时事件流（需管理员权限），支持按进程名过滤、暂停浏览，用于追踪后台进程的频繁启停行为。
+---
 
-### 网络与端口
+## 历史趋势持久化（v0.1.6 新增）
 
-上半区为网络工具：一键体检（本机 IP / 网关 / 公网 IP / 国内外延迟 / DNS 解析）、多路并发下行测速、任意 `域名/IP:端口` 连通性检测。下半区两个标签页：「端口连接」列出 TCP / UDP 端口 → 进程 → PID 映射，区分 IPv4 / IPv6 与监听状态，支持协议 / 家族 / 仅监听过滤，输入端口号即可定位占用进程并一键结束（自动分析同端口双栈绑定、避免误杀）；「进程流量」基于 ETW Kernel-Network 展示每进程实时上传 / 下载速率。
+历史数据不再只活在内存里，会以定长追加的方式落到本地磁盘：
 
-![网络与端口](docs/screenshots/03-network.png)
-
-### 磁盘管理
-
-「磁盘概况」展示分区容量与使用率、物理磁盘 SMART 健康状态与温度（温度需管理员权限）。「空间分析」对整卷做基于 NTFS MFT 的极速扫描——百万级文件数秒完成，输出大目录 / 大文件排行与占比条，支持目录逐级下钻、一键在资源管理器中定位。
-
-![磁盘空间分析](docs/screenshots/05-disk.png)
-
-### 优化加速
-
-「一键加速」组合垃圾清理与内存释放，实时显示内存占用、临时文件量与本次释放成果；四张状态卡片汇总全面体检、进程数、磁盘可用空间、开机启动项。子标签页提供：系统体检评分、垃圾清理（8 类系统垃圾 + 回收站，符号链接 / junction 安全防护）、开机启动项管理（滑动开关 + 二次确认）。
-
-![优化加速](docs/screenshots/04-optimize.png)
-
-### 系统工具
-
-- **防火墙**：全量出入站规则查看，按名称 / 端口过滤，规则启用 / 禁用开关
-- **系统还原**：一键创建系统还原点
-- **文件解锁**：查找并结束占用某个文件的进程
-- **导出报告**：系统快照导出（JSON / CSV）
-
-![系统工具](docs/screenshots/06-tools.png)
-
-### AI 助手
-
-接入 OpenAI 兼容接口，预置 OpenAI、DeepSeek、Kimi、通义千问、智谱、硅基流动、OpenRouter、Ollama 八家厂商，支持自定义地址与模型。每次提问自动附带当前系统快照（CPU / 内存 / 磁盘 / 进程 / 网络流量），基于真实数据给出诊断建议，并优先引导使用软件内已有功能解决问题。流式输出、Markdown 渲染、生成中可随时停止；API Key 仅保存在本机，不经过任何中间服务器。
-
-![AI 助手](docs/screenshots/07-assistant.png)
+- **位置**：`%LOCALAPPDATA%\WinTop\history\`（便携版写 exe 同级的 `WinTop-data\history\`）；
+- **格式**：自研定长记录（64 B/条，逐条 CRC32），按小时/天分段，**不引入 SQLite 等任何新依赖**；
+- **写入**：每 15 秒批量落盘，正常使用对磁盘的压力约 0.03%/秒；
+- **保留**：原始 1 秒 × 7 天 → 1 分钟聚合 × 90 天，**硬上限 200 MiB**，超出按最旧段淘汰；
+- **降级**：目录不可写、磁盘空间不足、已有实例占用时自动退回纯内存模式，不影响其它功能。
 
 ---
 
@@ -83,7 +75,7 @@ Win-Top 是一款现代化的 Windows 资源管理工具，聚焦系统与应用
 └──────────────────────────────┘
 ```
 
-**数据采集**——全部直调 Windows 原生接口，不派生 netstat / powershell 等子进程：
+**数据采集**——全部直调 Windows 原生接口，不派生 `netstat` / `powershell` 等子进程：
 
 | 能力 | 实现 |
 | --- | --- |
@@ -91,12 +83,15 @@ Win-Top 是一款现代化的 Windows 资源管理工具，聚焦系统与应用
 | 内存 | `GlobalMemoryStatusEx` |
 | 进程枚举 | `NtQuerySystemInformation` |
 | 进程操作 | `OpenProcess` / `TerminateProcess` / `SetPriorityClass` |
+| **每进程 GPU 占用 / 显存** | **PDH `GPU Engine` / `GPU Process Memory` / `GPU Adapter Memory`** |
+| **显卡名称与容量** | **DXGI `EnumAdapters1` + `DXGI_ADAPTER_DESC1`** |
 | 端口连接 | `GetExtendedTcpTable` / `GetExtendedUdpTable` |
 | 进程事件 / 每进程流量 | ETW（Kernel-Process / Kernel-Network） |
 | SMART / 磁盘温度 | WMI |
 | 空间分析 | NTFS MFT 直读 |
+| 历史持久化 | 自研定长追加文件（无第三方存储依赖） |
 
-**采集模型**：后端常驻采集线程分层采样（指标 1s、进程 2s、磁盘 15s、事件实时），通过事件推送到前端，避免高频轮询。
+**采集模型**：后端常驻采集线程分层采样（指标 1s、进程 2s、GPU 2s、磁盘 15s、事件实时），通过事件推送到前端，避免高频轮询。
 
 **权限模型**：默认普通权限运行，核心功能全部可用；ETW 实时事件、磁盘温度需要管理员权限，应用内提供「以管理员重启」一键提权；结束进程、清理磁盘、防火墙变更等风险操作均有确认与提示。
 
@@ -108,9 +103,9 @@ Win-Top 是一款现代化的 Windows 资源管理工具，聚焦系统与应用
 
 | 文件 | 说明 |
 | --- | --- |
+| `Win-Top_x.y.z_portable_x64.exe` | 绿色便携版，免安装，下载后双击即用（推荐快速体验） |
 | `Win-Top_x.y.z_x64-setup.exe` | NSIS 安装包，推荐 |
 | `Win-Top_x.y.z_x64_en-US.msi` | MSI 安装包 |
-| `Win-Top_x.y.z_portable_x64.exe` | 绿色便携版，免安装，下载后双击即用 |
 
 **系统要求**：Windows 10 1809+ / Windows 11，x64；依赖 WebView2 运行时（Windows 11 自带；使用安装包时若缺失会自动引导安装）。
 
@@ -127,6 +122,8 @@ npm run tauri dev     # 开发调试（Vite 热更新 + Rust 后端）
 npm run tauri build   # 构建安装包，产物在 src-tauri/target/release/bundle/
 ```
 
+发版流程见 [`docs/release-process.md`](docs/release-process.md)。
+
 ---
 
 ## 待做任务
@@ -135,20 +132,31 @@ npm run tauri build   # 构建安装包，产物在 src-tauri/target/release/bun
 - [ ] Ctrl+K 命令面板（全局搜索进程 / 端口 / 功能直达）
 - [ ] 概览仪表盘增强（模块聚合 Bento 布局）
 - [ ] 异常检测与自动化任务（高占用告警、定时清理）
-- [ ] 浅色主题、多语言
+- [ ] 浅色主题、多语言（i18n）
 - [ ] CSP 硬化与安装包代码签名
 - [ ] 远程管理、多设备统一监控
 - [ ] 插件生态、脚本分享
-
----
 
 ## 设计原则
 
 - **安全第一**：危险操作必须二次确认。
 - **可解释性**：执行前说明原因、风险、后果。
+- **不夸大**：不做「一键提速 300%」这类无法验证的承诺；口径说不清的数字，宁可不显示。
 - **可追溯性**：所有操作可查看日志与回滚建议。
 - **扩展性**：以插件与脚本体系持续演进。
 
 ## 项目愿景
 
-Win-Top 的目标是成为 Windows 平台上专业、智能、可扩展的资源管理与系统维护工具。它不仅是一款监控工具，更是一个“系统专家”，帮助用户理解电脑、管理电脑、优化电脑。
+Win-Top 的目标是成为 Windows 平台上专业、智能、可扩展的资源管理与系统维护工具。它不仅是一款监控工具，更是一个"系统专家"，帮助用户理解电脑、管理电脑、优化电脑。
+
+---
+
+## English
+
+**Win-Top is a Windows system monitor and resource manager** built with Tauri, Rust and Svelte.
+
+It unifies process management (**including per-process GPU usage and VRAM**), port-to-process mapping, disk space analysis, network throughput, startup-item control and AI-assisted diagnosis into one desktop workbench. Everything is collected straight from native Windows APIs (PDH / ETW / WMI / WinAPI) — **it never spawns `netstat`, `tasklist` or `powershell`** — and runs unelevated by default.
+
+Highlights: per-process GPU utilization and dedicated/shared VRAM, a per-adapter GPU card, history trends persisted to disk (1 s raw for 7 days, 1 min rollups for 90 days, 200 MiB hard cap), NTFS MFT based whole-volume space analysis, and ETW-driven real-time process and per-process network events.
+
+Requirements: Windows 10 1809+ / Windows 11, x64, WebView2 runtime. See [Releases](https://github.com/nickshui/Win-Top/releases).
