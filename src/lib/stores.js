@@ -158,6 +158,16 @@ export function startDiskIo() {
   return () => { if (un) un(); };
 }
 
+// 每进程 GPU 占用（来自 gpu_proc 线程的 gpu-proc 事件）
+// payload: { ts, available, reason, cost_ms, adapters[], rows[{ pid, name, gpu_pct, gpu_sum_pct, luid, engtype, engines[] }] }
+export const gpuProc = writable(null);
+
+export function startGpuProc() {
+  let un;
+  listen("gpu-proc", (e) => gpuProc.set(e.payload)).then((u) => (un = u));
+  return () => { if (un) un(); };
+}
+
 // 磁盘容量报告（供加速中心宫格展示系统盘用量）
 export const diskReport = writable(null);
 

@@ -28,3 +28,9 @@ nul
 *.log
 .bitfun/
 .claude/
+
+# 开发过程文档：本地保留，不入库（对外只保留 README 与 docs 下的正式文档）
+docs/research/
+docs/audit/
+docs/strategy/
+.superpowers/

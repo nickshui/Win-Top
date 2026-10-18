@@ -41,11 +41,9 @@ pub fn start(app: AppHandle) {
             }
             prev_time = now;
 
-            // Get process names once per iteration
-            let names = crate::process::pid_name_map();
-
-            // Enumerate PIDs using the shared helper
-            let pids = crate::process::list_pids();
+            // 进程名与 PID 列表来自同一次枚举（2 秒 TTL 缓存，避免三个线程各自全量枚举）
+            let names = crate::process::pid_name_map_cached();
+            let pids: Vec<u32> = names.keys().copied().collect();
 
             let mut cur: HashMap<u32, (u64, u64)> = HashMap::new();
 

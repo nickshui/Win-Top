@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -157,13 +157,28 @@ pub fn pid_name_map() -> HashMap<u32, String> {
     }
 }
 
-/// 返回当前所有进程的 PID 列表（轻量，不含 CPU 跟踪开销）。
-pub fn list_pids() -> Vec<u32> {
-    unsafe {
-        query_processes()
-            .map(|v| v.into_iter().map(|p| p.pid).collect())
-            .unwrap_or_default()
+/// 进程名缓存的 TTL。3 个后台线程（进程表 / disk_io / gpu_proc）节奏都是 1–2 秒，
+/// 单次全量枚举（实测 529 进程 / 14.4 ms）没有必要各做一次。
+const PID_NAME_TTL: Duration = Duration::from_secs(2);
+
+static PID_NAME_CACHE: LazyLock<Mutex<Option<(Instant, HashMap<u32, String>)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// 2 秒内复用同一次进程枚举结果，避免 disk_io / gpu_proc 各自全量枚举。
+/// 过期或为空时重新调用 `pid_name_map()`；锁中毒时退化为直接重新枚举，不会 panic。
+pub fn pid_name_map_cached() -> HashMap<u32, String> {
+    if let Ok(guard) = PID_NAME_CACHE.lock() {
+        if let Some((at, map)) = guard.as_ref() {
+            if !map.is_empty() && at.elapsed() < PID_NAME_TTL {
+                return map.clone();
+            }
+        }
     }
+    let fresh = pid_name_map();
+    if let Ok(mut guard) = PID_NAME_CACHE.lock() {
+        *guard = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
 }
 
 pub fn list_processes() -> Result<Vec<ProcessRow>, String> {

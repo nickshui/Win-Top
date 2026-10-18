@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { startMetrics, startEvents, startNetTraffic, startCleanupNotifications, startDiskIo } from "./lib/stores.js";
+  import { startMetrics, startEvents, startNetTraffic, startCleanupNotifications, startDiskIo, startGpuProc } from "./lib/stores.js";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import Overview from "./lib/views/Overview.svelte";
@@ -22,6 +22,7 @@
   let stopNetTraffic;
   let stopCleanupNotif;
   let stopDiskIo;
+  let stopGpuProc;
 
   onMount(() => {
     stopMetrics = startMetrics();
@@ -29,6 +30,7 @@
     stopNetTraffic = startNetTraffic();
     stopCleanupNotif = startCleanupNotifications();
     stopDiskIo = startDiskIo();
+    stopGpuProc = startGpuProc();
   });
   onDestroy(() => {
     if (stopMetrics) stopMetrics();
@@ -36,6 +38,7 @@
     if (stopNetTraffic) stopNetTraffic();
     if (stopCleanupNotif) stopCleanupNotif();
     if (stopDiskIo) stopDiskIo();
+    if (stopGpuProc) stopGpuProc();
   });
 
   const meta = {

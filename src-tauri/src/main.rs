@@ -23,6 +23,8 @@ mod cleanup;
 #[cfg(target_os = "windows")]
 mod history;
 #[cfg(target_os = "windows")]
+mod history_store;
+#[cfg(target_os = "windows")]
 mod memboost;
 #[cfg(target_os = "windows")]
 mod startup;
@@ -46,6 +48,8 @@ mod disk_usage;
 mod mft_scan;
 #[cfg(target_os = "windows")]
 mod disk_io;
+#[cfg(target_os = "windows")]
+mod gpu_proc;
 #[cfg(target_os = "windows")]
 mod health_check;
 #[cfg(target_os = "windows")]
@@ -168,7 +172,11 @@ async fn scan_volume(drive: String, top_n: usize) -> disk_usage::UsageReport {
             Ok(report) => report,
             Err(_) => {
                 // 回退：从盘根递归遍历（慢，但不依赖 MFT/权限）
-                let root = format!("{}\\", drive.trim().trim_end_matches('\\').trim_end_matches(':'));
+                // 注意：必须**先剥冒号、再剥尾部反斜杠**，然后补回一个 `\`。
+                // 曾经写成 trim_end_matches('\\').trim_end_matches(':')：对 "C:" 会先剥
+                // （无匹配）再剥冒号得 "C"，拼出相对路径 "C\"；随后 disk_usage 的
+                // root.exists() 为假，静默返回空报告。而 MFT 需提权，非管理员必走本分支。
+                let root = format!("{}\\", drive.trim().trim_end_matches(':').trim_end_matches('\\'));
                 disk_usage::scan_directory(root, top_n)
             }
         }
@@ -295,6 +303,23 @@ fn set_startup_enabled(id: String, enabled: bool) -> process::ActionResult {
 #[tauri::command]
 fn get_history(n: usize) -> Vec<collector::MetricsSnapshot> {
     history::recent(n)
+}
+
+/// 读盘取"最近 `seconds` 秒"的历史，抽稀到至多 `max_points` 个点（按 `ts_ms` 升序）。
+/// 走 `spawn_blocking`：读盘绝不允许阻塞 IPC/UI 线程。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn get_history_span(seconds: u64, max_points: usize) -> Vec<collector::MetricsSnapshot> {
+    tauri::async_runtime::spawn_blocking(move || history_store::read_span(seconds, max_points))
+        .await
+        .unwrap_or_default()
+}
+
+/// 历史持久化状态（是否在写、目录、占用字节、最旧/最新时间、降级原因）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_history_status() -> history_store::HistoryStatus {
+    history_store::status()
 }
 
 #[cfg(target_os = "windows")]
@@ -460,9 +485,19 @@ fn main() {
             events::start(handle.clone());
             // 每进程磁盘 I/O 追踪（低权限，每 2 秒采集）
             disk_io::start(handle.clone());
+            // 每进程 GPU 占用追踪（PDH GPU Engine 计数器，每 2 秒采集；纯推送，无新 command）
+            gpu_proc::start(handle.clone());
+            // 历史趋势持久化（定长追加 + 保留/淘汰；磁盘不可用时自动退回纯内存）
+            history_store::start(handle.clone());
             // 初始化定时清理调度器
             scheduler::init_scheduler(handle.clone());
             Ok(())
+        })
+        // 退出前让历史写线程 flush + sync（最多丢最后 15 秒）
+        .on_window_event(|event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event.event() {
+                history_store::shutdown();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_processes,
@@ -488,6 +523,8 @@ fn main() {
             list_startup,
             set_startup_enabled,
             get_history,
+            get_history_span,
+            get_history_status,
             export_snapshot,
             export_processes_csv,
             set_cleanup_schedule,

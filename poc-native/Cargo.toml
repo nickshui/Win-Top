@@ -19,6 +19,12 @@ windows = { version = "0.58", features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_ApplicationInstallationAndServicing",
   "Win32_System_Registry",
+  # gpuproc POC 追加：DXGI 显卡枚举 / COM 初始化 / 进程名 / 自身 CPU 计时
+  "Win32_Graphics_Dxgi",
+  "Win32_System_Com",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Wdk_System_SystemInformation",
 ] }
 netstat2 = "0.9"
 ferrisetw = "1"
@@ -44,3 +50,7 @@ path = "src/bin/msiscan.rs"
 [[bin]]
 name = "userassist"
 path = "src/bin/userassist.rs"
+
+[[bin]]
+name = "gpuproc"
+path = "src/bin/gpuproc.rs"

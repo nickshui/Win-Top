@@ -24,7 +24,10 @@ use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTAT
 
 #[derive(Serialize, Clone)]
 pub struct MetricsSnapshot {
+    /// 显示用本地时间 `%H:%M:%S`（保持原样以兼容既有前端）。
     pub ts: String,
+    /// 规范时间戳：Unix epoch 毫秒。落盘与跨天判定用它（`ts` 没有日期）。
+    pub ts_ms: i64,
     pub cpu: f64,
     pub mem_load: u32,
     pub mem_used_gb: f64,
@@ -34,6 +37,8 @@ pub struct MetricsSnapshot {
     pub disk_read_bps: f64,
     pub disk_write_bps: f64,
     pub net_total_bps: f64,
+    /// 嵌套 GPU 历史样本（`gpu_proc` 每 2 秒发布一次；未就绪时全为默认值）。
+    pub gpu: crate::gpu_proc::GpuHistSample,
 }
 
 fn read_memory() -> Option<(u32, f64, f64, f64, f64)> {
@@ -192,8 +197,13 @@ pub fn run_metrics_loop(app: AppHandle) {
             let (mem_load, mem_used_gb, mem_total_gb, mem_page_total_gb, mem_page_used_gb) =
                 read_memory().unwrap_or((0, 0.0, 0.0, 0.0, 0.0));
 
+            // GPU 历史样本：gpu_proc 每 2 秒发布一次，这里每秒读一次（廉价，只 clone 一个小结构）
+            let gpu = crate::gpu_proc::histogram_sample();
+            let now = Local::now();
+
             let snapshot = MetricsSnapshot {
-                ts: Local::now().format("%H:%M:%S").to_string(),
+                ts: now.format("%H:%M:%S").to_string(),
+                ts_ms: now.timestamp_millis(),
                 cpu,
                 mem_load,
                 mem_used_gb,
@@ -203,6 +213,7 @@ pub fn run_metrics_loop(app: AppHandle) {
                 disk_read_bps,
                 disk_write_bps,
                 net_total_bps,
+                gpu,
             };
 
             // 推入历史环形缓冲区
