@@ -1,13 +1,14 @@
 {
   "name": "win-top",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test": "node --test src/lib/*.test.js",
     "test:uninstall": "node --test src/lib/uninstallWorkflow.test.js"
   },
   "dependencies": {
