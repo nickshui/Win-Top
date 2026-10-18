@@ -11,6 +11,14 @@ use serde::Serialize;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// 转义 PowerShell 单引号字符串里的内容：`'` -> `''`。
+/// 单引号字符串内 `$`、反引号、双引号都是字面量，只有单引号需要翻倍。
+/// 服务名来自 IPC（前端/将来的 AI 工具调用），不转义会形成命令注入。
+/// 同仓库 restore.rs 与 file_unlock.rs 已采用同一做法。
+fn ps_quote(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 static ROLLBACK: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -97,7 +105,7 @@ pub fn set_service_startup(name: &str, startup_type: &str) -> ServiceActionResul
         }
     }
 
-    let script = format!("Set-Service -Name '{}' -StartupType {} -ErrorAction Stop", name, st);
+    let script = format!("Set-Service -Name '{}' -StartupType {} -ErrorAction Stop", ps_quote(name), st);
     let output = Command::new("powershell")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-Command", &script])
@@ -151,11 +159,67 @@ pub fn restore_all_services() -> ServiceActionResult {
 
 fn set_service_startup_force(name: &str, sc_type: &str) -> ServiceActionResult {
     let st = match sc_type { "auto" => "Automatic", "demand" => "Manual", "disabled" => "Disabled", _ => return ServiceActionResult { success: false, message: String::new(), can_rollback: false } };
-    let script = format!("Set-Service -Name '{}' -StartupType {} -ErrorAction SilentlyContinue", name, st);
+    let script = format!("Set-Service -Name '{}' -StartupType {} -ErrorAction SilentlyContinue", ps_quote(name), st);
     let output = Command::new("powershell").creation_flags(CREATE_NO_WINDOW).args(["-NoProfile", "-Command", &script]).output();
     match output {
         Ok(o) if o.status.success() => ServiceActionResult { success: true, message: String::new(), can_rollback: false },
         Ok(o) => ServiceActionResult { success: false, message: String::from_utf8_lossy(&o.stderr).trim().to_string(), can_rollback: false },
         Err(e) => ServiceActionResult { success: false, message: e.to_string(), can_rollback: false },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ps_quote;
+
+    /// PowerShell 单引号字符串里的不变量：转义后每一段连续的单引号长度都必须是偶数。
+    /// 出现奇数长度的连续引号，就意味着字符串被提前闭合，可以注入命令。
+    fn has_odd_quote_run(s: &str) -> bool {
+        let mut run = 0usize;
+        for ch in s.chars() {
+            if ch == '\'' {
+                run += 1;
+            } else {
+                if run % 2 == 1 {
+                    return true;
+                }
+                run = 0;
+            }
+        }
+        run % 2 == 1
+    }
+
+    #[test]
+    fn ps_quote_doubles_single_quotes() {
+        assert_eq!(ps_quote("wuauserv"), "wuauserv");
+        assert_eq!(ps_quote("O'Brien Svc"), "O''Brien Svc");
+    }
+
+    #[test]
+    fn ps_quote_neutralizes_command_injection() {
+        // 未转义时这段会让 PowerShell 提前闭合字符串并执行额外的 Remove-Item
+        let evil = "x'; Remove-Item C:\\temp -Recurse -Force; '";
+        let quoted = ps_quote(evil);
+        assert!(
+            !has_odd_quote_run(&quoted),
+            "出现奇数长度的连续引号，字符串被提前闭合，注入成立：{}",
+            quoted
+        );
+        // 载荷含 2 个单引号，转义后应为 4 个
+        assert_eq!(quoted.matches('\'').count(), 4, "转义结果异常：{}", quoted);
+    }
+
+    #[test]
+    fn ps_quote_keeps_escaped_text_inside_the_string() {
+        // 转义后必须仍是一个完整字符串：仅一对 PoweShell 语法引号在两端
+        let quoted = ps_quote("a'b");
+        assert_eq!(quoted, "a''b");
+        assert!(!has_odd_quote_run(&quoted));
+    }
+
+    #[test]
+    fn ps_quote_leaves_shell_metachars_literal() {
+        // 单引号字符串内 $ 与反引号是字面量，不应被改写
+        assert_eq!(ps_quote("$env:PATH`n"), "$env:PATH`n");
     }
 }
