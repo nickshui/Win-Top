@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "sync-version": "node scripts/sync-version.mjs",
     "tauri": "tauri",
     "test": "node --test src/lib/*.test.js",
     "test:uninstall": "node --test src/lib/uninstallWorkflow.test.js"

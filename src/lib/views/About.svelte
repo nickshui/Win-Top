@@ -1,10 +1,9 @@
 <script>
   import { open } from "@tauri-apps/api/shell";
   import Icon from "../components/Icon.svelte";
-  import packageInfo from "../../../package.json";
+  import { currentVersion } from "../update.js";
 
   const PROJECT_URL = "https://github.com/nickshui/Win-Top";
-  const VERSION = packageInfo.version;
 
   const recommendations = [
     {
@@ -42,7 +41,7 @@
   <div class="hero">
     <span class="logo"></span>
     <div>
-      <div class="title">Win-Top <span class="ver">v{VERSION}</span></div>
+      <div class="title">Win-Top <span class="ver">v{$currentVersion || "—"}</span></div>
       <div class="subtitle">Windows 智能资源管理工作台</div>
     </div>
   </div>

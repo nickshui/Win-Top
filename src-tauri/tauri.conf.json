@@ -1,14 +1,14 @@
 {
   "build": {
-    "beforeBuildCommand": "npm run build",
-    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "node scripts/sync-version.mjs && npm run build",
+    "beforeDevCommand": "node scripts/sync-version.mjs && npm run dev",
     "devPath": "http://localhost:1420",
     "distDir": "../dist",
     "withGlobalTauri": true
   },
   "package": {
     "productName": "Win-Top",
-    "version": "0.1.7"
+    "version": "../package.json"
   },
   "tauri": {
     "allowlist": {
