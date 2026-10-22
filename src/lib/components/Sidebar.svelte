@@ -1,5 +1,6 @@
 <script>
   import Icon from "./Icon.svelte";
+  import VersionStatus from "./VersionStatus.svelte";
 
   export let current = "overview";
   export let onSelect = () => {};
@@ -38,9 +39,12 @@
     {/each}
   </nav>
 
-  <div class="foot">
-    <span class="status-dot"></span>
-    <span>原生采集 · ETW 架构</span>
+  <div class="footer">
+    <div class="foot">
+      <span class="status-dot"></span>
+      <span>原生采集 · ETW 架构</span>
+    </div>
+    <VersionStatus />
   </div>
 </aside>
 
@@ -114,14 +118,21 @@
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
-  .foot {
+  .footer {
     margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-top: 1px solid var(--border);
+    padding-top: var(--sp-2);
+  }
+  .foot {
     display: flex;
     align-items: center;
     gap: var(--sp-2);
     font-size: 12px;
     color: var(--text-muted);
-    padding: var(--sp-2);
+    padding: 4px var(--sp-2);
   }
   .status-dot {
     width: 8px;

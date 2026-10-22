@@ -3,6 +3,8 @@
 
   export let open = false;
   export let title = "";
+  /// 弹窗宽度（px）。默认 380；内容较多的弹窗（如更新说明）可放宽。
+  export let width = 380;
 
   const dispatch = createEventDispatcher();
   let dialog;
@@ -69,7 +71,7 @@
 {#if open}
   <div class="backdrop">
     <button class="backdrop-btn" aria-label="关闭" on:click={close}></button>
-    <div bind:this={dialog} class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+    <div bind:this={dialog} class="modal" style="width: {width}px" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
       <h3 id="modal-title">{title}</h3>
       <div class="body"><slot /></div>
     </div>
@@ -99,6 +101,8 @@
     position: relative;
     width: 380px;
     max-width: calc(100vw - 32px);
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -109,6 +113,16 @@
     outline: none;
   }
   .modal:focus-visible { box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.5); }
+  .modal::-webkit-scrollbar {
+    width: 7px;
+  }
+  .modal::-webkit-scrollbar-thumb {
+    background: var(--surface-2);
+    border-radius: 999px;
+  }
+  .modal::-webkit-scrollbar-track {
+    background: transparent;
+  }
   h3 {
     margin: 0;
     font-size: 16px;

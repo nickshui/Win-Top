@@ -66,6 +66,8 @@ mod usage_stats;
 mod app_score;
 #[cfg(target_os = "windows")]
 mod uninstall;
+#[cfg(target_os = "windows")]
+mod update;
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -322,6 +324,34 @@ fn get_history_status() -> history_store::HistoryStatus {
     history_store::status()
 }
 
+/// 检查 GitHub 最新正式 release（只读公开元数据；不下载、不安装、不改本机）。
+/// 网络请求放阻塞线程池，避免占住 IPC 线程导致界面卡顿。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn check_update(current_version: String) -> Result<update::UpdateInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || update::check_update(&current_version))
+        .await
+        .unwrap_or_else(|_| Err("更新检查任务异常退出".to_string()))
+}
+
+/// 下载并安装更新：按当前安装形态（便携版 / NSIS / MSI）自动完成替换或安装，
+/// 成功后进程会重启（本命令不会正常返回）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    url: String,
+    kind: String,
+    digest: Option<String>,
+    size: u64,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        update::install_update(&app, &url, &kind, digest.as_deref(), size)
+    })
+    .await
+    .unwrap_or_else(|_| Err("更新任务异常退出".to_string()))
+}
+
 #[cfg(target_os = "windows")]
 #[tauri::command]
 async fn export_snapshot() -> Result<export::ExportResult, String> {
@@ -472,9 +502,17 @@ async fn undo_removal(undo_token: String) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 fn main() {
+    // 便携版自动更新：更新助手进程会在 Tauri 初始化前接管，替换 exe 后退出。
+    // 必须在任何 Tauri/窗口初始化之前。
+    if let Some(code) = update::run_helper_if_requested() {
+        std::process::exit(code);
+    }
+
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle();
+            // 上次便携版更新留下的 .old 备份（新进程退出前一直被占用）
+            update::cleanup_old_binary();
             std::thread::spawn({
                 let h = handle.clone();
                 move || collector::run_metrics_loop(h)
@@ -525,6 +563,8 @@ fn main() {
             get_history,
             get_history_span,
             get_history_status,
+            check_update,
+            install_update,
             export_snapshot,
             export_processes_csv,
             set_cleanup_schedule,

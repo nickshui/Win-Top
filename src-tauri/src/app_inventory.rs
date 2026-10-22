@@ -127,7 +127,7 @@ pub(crate) unsafe fn read_string(hkey: HKEY, name: &str) -> String {
 }
 
 /// 读 DWORD 值。
-unsafe fn read_u32(hkey: HKEY, name: &str) -> Option<u32> {
+pub(crate) unsafe fn read_u32(hkey: HKEY, name: &str) -> Option<u32> {
     match read_value_raw(hkey, name) {
         Some((_t, bytes)) if bytes.len() >= 4 => {
             Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
