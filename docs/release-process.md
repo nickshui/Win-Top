@@ -6,13 +6,15 @@
 
 ## 1. 版本号
 
-版本号需在 **三处** 同步修改（保持一致）：
+版本号**只在 `package.json` 的 `version` 一处修改**，其余位置自动跟随：
 
-| 文件 | 字段 |
+| 位置 | 说明 |
 | --- | --- |
-| `package.json` | `version` |
-| `src-tauri/tauri.conf.json` | `package.version` |
-| `src-tauri/Cargo.toml` | `[package] version` |
+| `package.json` → `version` | **唯一来源**，手动修改 |
+| `src-tauri/tauri.conf.json` → `package.version` | 固定为 `"../package.json"`（Tauri v1 官方支持的 path 形式），无需手改；运行时 `getVersion()` 与打包版本都读它 |
+| `src-tauri/Cargo.toml` → `[package] version` | 构建前由 `scripts/sync-version.mjs` 自动同步，无需手改 |
+
+`npm run tauri build` / `npm run tauri dev` 会先执行 `node scripts/sync-version.mjs`：同步 Cargo.toml、并触摸 `tauri.conf.json` 让 Cargo 重新解析版本（只改 package.json 不会自动触发 Cargo 重建）。单独跑 `cargo build` 前请先执行 `npm run sync-version`。
 
 版本策略：`0.x.y` 阶段功能批次与修复均递增补丁号（如 0.1.2 → 0.1.3）；出现不兼容的配置/数据变更时递增次版本号。
 
@@ -46,6 +48,17 @@ Copy-Item src-tauri\target\release\Win-Top.exe "src-tauri\target\release\bundle\
 | `Win-Top_{版本}_x64-setup.exe` | `src-tauri/target/release/bundle/nsis/` | NSIS 安装程序 |
 | `Win-Top_{版本}_x64_en-US.msi` | `src-tauri/target/release/bundle/msi/` | MSI 安装包 |
 
+### 4.1 更新通道（无需额外产物、无需 CI）
+
+应用内更新直接读取 GitHub Releases API 与上面这 3 个资产：**不需要 `latest.json`、`.sig`、签名密钥或 GitHub Actions**。
+
+- 资产名必须保持上表命名：含 `portable` → 便携版通道；`-setup.exe` → NSIS 通道；`.msi` → MSI 通道；
+- 客户端按自身安装形态自动选资产（卸载注册表登记 → NSIS/MSI；未登记且无标记 → 便携版）；
+- 下载后校验 GitHub API 返回的 `digest`（sha256）与文件魔数，随后自动安装并重启；
+- 发版时只需把这 3 个资产上传到标记为 latest 的 Release，旧版本应用下一次检查即可看到更新。
+
+> 更新校验仍依赖 GitHub HTTPS + 资产 sha256 摘要，未使用 minisign 签名；因此不要删除/替换已发布 Release 的资产（GitHub 的 digest 会随之变化，但已安装用户依赖的是当时拉取到的版本）。
+
 ## 5. 本地验证（发布前必做）
 
 用安装包或便携版实际安装/运行一遍，检查：
@@ -55,6 +68,7 @@ Copy-Item src-tauri\target\release\Win-Top.exe "src-tauri\target\release\bundle\
 - [ ] 「以管理员重启」后：实时事件有事件流、磁盘温度可显示
 - [ ] AI 助手多轮对话正常（本次改动涉及的模块重点回归）
 - [ ] 本次版本的新增 / 修复点逐项复验
+- [ ] **更新链路复验**：用上一版安装包/便携版打开应用 → 点侧栏版本号 → 显示新版本与更新说明 → 点「立即更新并重启」→ 自动安装/替换并重启，版本号变为新版，历史数据仍在
 
 ## 6. 提交与打标
 
@@ -125,4 +139,5 @@ gh release create v{版本} --latest --title "Win-Top v{版本} {亮点}" --note
 
 - [ ] Release 页三个产物可正常下载；
 - [ ] README 顶部 release 徽章显示新版本号；
-- [ ] 安装包下载后可安装运行（SmartScreen 提示属预期）。
+- [ ] 安装包下载后可安装运行（SmartScreen 提示属预期）；
+- [ ] 用上一版客户端点「重新检查」→「立即更新并重启」验证自动更新闭环（GitHub API 有缓存，必要时等几分钟）。

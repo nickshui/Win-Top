@@ -76,6 +76,12 @@
 - 文件占用解锁：按路径查找占用进程并结束；
 - 导出报告：系统快照 JSON（进程 + 端口 + 磁盘 + 启动项）与进程列表 CSV，写到桌面。
 
+### 版本与更新
+- 侧边栏底部常驻当前版本，点击可检查 GitHub 最新正式版本（启动后静默检查一次，失败不打扰）；
+- **支持应用内自动更新**：安装版（NSIS / MSI）下载对应安装包后静默安装并自动重启；便携版下载新版 exe 后原地替换并重启（不写入系统目录）；MSI per-machine 更新会请求一次 UAC 确认；
+- 下载后校验 GitHub 资产 `sha256` 摘要与文件魔数，失败即中止；只访问 GitHub 公开版本信息与官方 Release 资产，不静默提权、不上传任何本机数据；
+- 未引入代码签名 / minisign 验签：更新完整性依赖 GitHub HTTPS 与资产摘要，与手动下载同源（见待做）。
+
 ### AI 助手
 - 内置 8 家 OpenAI 兼容厂商（OpenAI / DeepSeek / 月之暗面 / 阿里通义 / 智谱 / 硅基流动 / OpenRouter / 本地 Ollama），也可填自定义接口与模型；
 - 每次提问自动附带当前系统快照（CPU / 内存 / 磁盘 / 网络 / 进程 TOP / 分区占用），基于实测数据回答；
@@ -114,9 +120,9 @@ Windows 的 GPU 性能计数器按 **(进程, 显卡, 引擎)** 暴露实例，W
 
 历史数据不再只活在内存里，会以定长追加的方式落到本地磁盘：
 
-- **位置**：`%LOCALAPPDATA%\WinTop\history\`（便携版写 exe 同级的 `WinTop-data\history\`）；
+- **位置**：`%LOCALAPPDATA%\WinTop\history\`；若 exe 同级存在 `wintop.portable` 标记文件则改为 `<exe 同级>\WinTop-data\history\`（发行的便携版 exe 默认不带该标记，因此默认仍写 `%LOCALAPPDATA%`；需要自包含时手动创建空文件 `wintop.portable`）；
 - **格式**：自研定长记录（64 B/条，逐条 CRC32），按小时/天分段，**不引入 SQLite 等任何新依赖**；
-- **写入**：每 15 秒批量落盘，正常使用对磁盘的压力约 0.03%/秒；
+- **写入**：每 15 秒批量落盘，正常使用对磁盘的压力是"每天秒级 I/O"；
 - **保留**：原始 1 秒 × 7 天 → 1 分钟聚合 × 90 天，**硬上限 200 MiB**，超出按最旧段淘汰；
 - **GPU 历史**：只保存最忙引擎的标量（单条曲线），逐卡明细仅在实时视图可见；
 - **降级**：目录不可写、磁盘空间不足、已有实例占用时自动退回纯内存模式，不影响其它功能。
@@ -158,6 +164,7 @@ Windows 的 GPU 性能计数器按 **(进程, 显卡, 引擎)** 暴露实例，W
 | SMART / 磁盘温度 | WMI |
 | 空间分析 | NTFS MFT 直读 |
 | 历史持久化 | 自研定长追加文件（无第三方存储依赖） |
+| **应用更新** | **GitHub Releases API + 自研下载/安装器（SHA-256 摘要 + 文件魔数校验；无签名密钥，便携版原地替换、NSIS/MSI 静默安装）** |
 
 > **关于子进程**：上面这条只覆盖**监控采集**路径。系统工具类操作走的是另一条路径——防火墙用 `netsh`、系统还原 / 服务管理 / 文件解锁用 PowerShell、软件卸载用厂商卸载器或 `msiexec` / `reg.exe`、DNS 缓存清理用 `ipconfig`。这些都是系统自带组件，但确实会派生子进程，此处如实说明。
 
@@ -220,6 +227,7 @@ npm run tauri build   # 构建安装包，产物在 src-tauri/target/release/bun
 | 文件解锁原生实现 | 部分实现 | 现走 PowerShell 模块匹配，计划改用 Restart Manager |
 | 服务改动与清理间隔持久化 | 部分实现 | 服务原值存内存、调度器重启失效 |
 | 未接入界面的后端能力 | 后端已实现 | 后台进程建议、视觉效果预设（最佳性能 / 外观 + 还原）尚无入口 |
+| 应用内自动更新 | 基本完成 | 检查 + 下载 + 自动安装/重启已打通（便携版原地替换、NSIS/MSI 静默安装，SHA-256 校验）；未做代码签名 / minisign 验签与回滚 |
 | CSP 硬化与代码签名 | 完全没做 | 当前未启用 CSP、Tauri allowlist 全开、安装包无签名 |
 | 浅色主题与多语言 | 完全没做 | 目前仅深色主题、界面文案仅中文 |
 | 远程管理与多设备监控 | 完全没做 | 需要网络服务端与账号体系 |
@@ -245,6 +253,6 @@ Win-Top 的目标是成为 Windows 平台上专业、智能、可扩展的资源
 
 It unifies process management (**including per-process GPU usage and VRAM**), port-to-process mapping, disk space analysis, network throughput, startup-item control, app uninstalling and AI-assisted diagnosis into one desktop workbench. All monitoring data is collected straight from native Windows APIs (PDH / ETW / WMI / WinAPI) — **process and port data never come from shelling out to `netstat` or `tasklist`** — and it runs unelevated by default. (System-tool actions such as firewall rules, restore points, file unlocking and uninstalling do invoke built-in `netsh` / PowerShell / vendor uninstallers.)
 
-Highlights: per-process GPU utilization and dedicated/shared VRAM, a per-adapter GPU card, history trends persisted to disk (1 s raw for 7 days, 1 min rollups for 90 days, 200 MiB hard cap), NTFS MFT based whole-volume space analysis, and ETW-driven real-time process and per-process network events.
+Highlights: per-process GPU utilization and dedicated/shared VRAM, a per-adapter GPU card, history trends persisted to disk (1 s raw for 7 days, 1 min rollups for 90 days, 200 MiB hard cap), NTFS MFT based whole-volume space analysis, ETW-driven real-time process and per-process network events, and in-app updates (check + one-click install: portable in-place replace, NSIS/MSI silent install; SHA-256 verified, no signing keys).
 
 Requirements: Windows 10 1809+ / Windows 11, x64, WebView2 runtime. See [Releases](https://github.com/nickshui/Win-Top/releases).
