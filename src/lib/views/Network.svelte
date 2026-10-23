@@ -62,7 +62,7 @@
   let listeningOnly = false;
   let timer;
 
-  let tab = "ports"; // ports | traffic
+  let tab = "traffic"; // traffic | ports（进程流量在前，默认展示）
 
   // 进程流量表：本地排序状态 + 格式化
   let tSortKey = "down_bps";
@@ -101,6 +101,46 @@
     .slice()
     .sort((a, b) => b.down_bps - a.down_bps)
     .slice(0, 3);
+
+  // 进程流量：点击行在右侧展开进程详情（与「进程管理」的交互一致）
+  let tDetailPid = null;
+  let tDetail = null;
+  let tDetailLoading = false;
+  let tDetailTraffic = null;
+
+  async function showTrafficDetail(pid) {
+    if (tDetailPid === pid) {
+      closeTrafficDetail();
+      return;
+    }
+    tDetailPid = pid;
+    tDetailLoading = true;
+    tDetail = null;
+    tDetailTraffic = trafficRows.find((r) => r.pid === pid) ?? null;
+    try {
+      tDetail = await invoke("get_process_detail", { pid });
+    } catch (e) {
+      pushToast("读取进程详情失败：" + e, "error");
+      closeTrafficDetail();
+    } finally {
+      tDetailLoading = false;
+    }
+  }
+
+  function closeTrafficDetail() {
+    tDetailPid = null;
+    tDetail = null;
+    tDetailTraffic = null;
+  }
+
+  // 详情面板打开期间持续刷新该进程的流量数值；进程短暂无流量时保留上次快照
+  $: if (tDetailPid != null && traffic) {
+    const row = (traffic.rows ?? []).find((r) => r.pid === tDetailPid);
+    if (row) tDetailTraffic = row;
+  }
+
+  // 该进程关联的端口连接（复用端口表数据）
+  $: tDetailConns = tDetailPid == null ? [] : rows.filter((r) => r.pid === tDetailPid);
 
   const COMMON_PORTS = new Set([
     20, 21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 1433, 1521,
@@ -289,21 +329,21 @@
 <div class="tabs" role="tablist">
   <button
     class="tab"
-    class:active={tab === "ports"}
-    role="tab"
-    aria-selected={tab === "ports"}
-    on:click={() => (tab = "ports")}
-  >
-    端口连接 <span class="tab-badge">{rows.length}</span>
-  </button>
-  <button
-    class="tab"
     class:active={tab === "traffic"}
     role="tab"
     aria-selected={tab === "traffic"}
     on:click={() => (tab = "traffic")}
   >
     进程流量
+  </button>
+  <button
+    class="tab"
+    class:active={tab === "ports"}
+    role="tab"
+    aria-selected={tab === "ports"}
+    on:click={() => (tab = "ports")}
+  >
+    端口连接 <span class="tab-badge">{rows.length}</span>
   </button>
   <span class="tab-meta">
     {#if tab === "traffic"}
@@ -337,35 +377,97 @@
       </div>
     {/if}
 
-    <div class="table-wrap tab-table sortable">
-      <table>
-        <thead>
-          <tr>
-            <th class="col-proc" on:click={() => setTSort("name")}>进程{tArrow("name")}</th>
-            <th class="num" on:click={() => setTSort("pid")}>PID{tArrow("pid")}</th>
-            <th class="num" on:click={() => setTSort("down_bps")}>↓ 下载{tArrow("down_bps")}</th>
-            <th class="num" on:click={() => setTSort("up_bps")}>↑ 上传{tArrow("up_bps")}</th>
-            <th class="num" on:click={() => setTSort("recv_total")}>累计↓{tArrow("recv_total")}</th>
-            <th class="num" on:click={() => setTSort("sent_total")}>累计↑{tArrow("sent_total")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#if trafficRows.length === 0}
-            <tr><td colspan="6" class="empty">暂无有流量的进程</td></tr>
+    <div class="table-stack" class:with-detail={tDetailPid != null}>
+      <div class="table-wrap tab-table sortable">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-proc" on:click={() => setTSort("name")}>进程{tArrow("name")}</th>
+              <th class="num" on:click={() => setTSort("pid")}>PID{tArrow("pid")}</th>
+              <th class="num" on:click={() => setTSort("down_bps")}>↓ 下载{tArrow("down_bps")}</th>
+              <th class="num" on:click={() => setTSort("up_bps")}>↑ 上传{tArrow("up_bps")}</th>
+              <th class="num" on:click={() => setTSort("recv_total")}>累计↓{tArrow("recv_total")}</th>
+              <th class="num" on:click={() => setTSort("sent_total")}>累计↑{tArrow("sent_total")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#if trafficRows.length === 0}
+              <tr><td colspan="6" class="empty">暂无有流量的进程</td></tr>
+            {:else}
+              {#each trafficRows as t (t.pid)}
+                <tr
+                  class="traffic-row"
+                  class:active-row={tDetailPid === t.pid}
+                  on:click={() => showTrafficDetail(t.pid)}
+                  title="点击查看进程详情"
+                >
+                  <td class="col-proc" title={t.name}>{t.name}</td>
+                  <td class="num mono">{t.pid}</td>
+                  <td class="num mono">{fmtRate(t.down_bps)}</td>
+                  <td class="num mono">{fmtRate(t.up_bps)}</td>
+                  <td class="num mono">{fmtBytes(t.recv_total)}</td>
+                  <td class="num mono">{fmtBytes(t.sent_total)}</td>
+                </tr>
+              {/each}
+            {/if}
+          </tbody>
+        </table>
+      </div>
+
+      {#if tDetailPid != null}
+        <aside class="detail-panel" aria-label="进程流量详情">
+          <button class="close-btn" on:click={closeTrafficDetail} aria-label="关闭详情">✕</button>
+          {#if tDetailLoading}
+            <p class="ck-hint">正在读取进程详情…</p>
+          {:else if tDetail}
+            <div class="detail-header">
+              <h3 class="detail-name" title={tDetail.name}>{tDetail.name}</h3>
+              <span class="muted mono">PID {tDetail.pid}</span>
+            </div>
+            <dl class="detail-grid">
+              <dt>当前 ↓ / ↑</dt>
+              <dd class="mono">{fmtRate(tDetailTraffic?.down_bps)} / {fmtRate(tDetailTraffic?.up_bps)}</dd>
+              <dt>累计 ↓ / ↑</dt>
+              <dd class="mono">{fmtBytes(tDetailTraffic?.recv_total)} / {fmtBytes(tDetailTraffic?.sent_total)}</dd>
+              <dt>完整路径</dt>
+              <dd class="mono path-text">{tDetail.full_path || "(无)"}</dd>
+              <dt>命令行</dt>
+              <dd class="mono cmd">{tDetail.command_line || "(无)"}</dd>
+              <dt>父进程 PID</dt>
+              <dd class="mono">{tDetail.parent_pid || 0}</dd>
+              <dt>线程 / 句柄</dt>
+              <dd class="mono">{tDetail.threads ?? 0} / {tDetail.handles ?? 0}</dd>
+              <dt>优先级</dt>
+              <dd class="mono">{tDetail.priority || "-"}</dd>
+            </dl>
+
+            <div class="detail-section">
+              <div class="detail-section-title">
+                关联连接 <span class="muted">({tDetailConns.length})</span>
+              </div>
+              {#if tDetailConns.length === 0}
+                <p class="muted">暂无可见的端口连接（监听 / 已建立）。</p>
+              {:else}
+                <ul class="conn-list">
+                  {#each tDetailConns.slice(0, 8) as c (c.protocol + "|" + c.port + "|" + c.remote + "|" + c.state)}
+                    <li>
+                      <span class="conn-proto">{c.protocol}·{c.family === "IPv6" ? "v6" : "v4"}</span>
+                      <span class="mono">{c.port}</span>
+                      <span class="state {c.state === 'LISTEN' ? 'listen' : c.state === 'ESTABLISHED' ? 'estab' : 'other'}">{c.state}</span>
+                      <span class="mono conn-remote" title={c.remote}>{c.remote}</span>
+                    </li>
+                  {/each}
+                </ul>
+                {#if tDetailConns.length > 8}
+                  <p class="muted">仅显示前 8 条，共 {tDetailConns.length} 条。</p>
+                {/if}
+              {/if}
+            </div>
           {:else}
-            {#each trafficRows as t (t.pid)}
-              <tr>
-                <td class="col-proc" title={t.name}>{t.name}</td>
-                <td class="num mono">{t.pid}</td>
-                <td class="num mono">{fmtRate(t.down_bps)}</td>
-                <td class="num mono">{fmtRate(t.up_bps)}</td>
-                <td class="num mono">{fmtBytes(t.recv_total)}</td>
-                <td class="num mono">{fmtBytes(t.sent_total)}</td>
-              </tr>
-            {/each}
+            <p class="muted">未读取到进程详情（进程可能已退出）。</p>
           {/if}
-        </tbody>
-      </table>
+        </aside>
+      {/if}
     </div>
   {/if}
 {:else}
@@ -586,6 +688,145 @@
   }
   tbody tr:hover {
     background: var(--surface-2);
+  }
+
+  /* 进程流量表 + 右侧详情：与「进程管理」一致的选中/面板交互 */
+  .table-stack {
+    display: flex;
+    align-items: flex-start;
+    min-width: 0;
+  }
+  .table-stack .table-wrap {
+    flex: 1;
+    min-width: 0;
+  }
+  .table-stack.with-detail .table-wrap {
+    border-radius: var(--radius) 0 0 var(--radius);
+    border-right: none;
+  }
+  .traffic-row {
+    cursor: pointer;
+  }
+  tbody tr.active-row {
+    background: rgba(99, 102, 241, 0.12);
+  }
+  tbody tr.active-row:hover {
+    background: rgba(99, 102, 241, 0.16);
+  }
+  .detail-panel {
+    width: 330px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: none;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: var(--sp-4);
+    max-height: calc(100vh - 260px);
+    overflow-y: auto;
+    position: relative;
+  }
+  .close-btn {
+    position: absolute;
+    top: var(--sp-2);
+    right: var(--sp-2);
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+  .close-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .detail-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: var(--sp-3);
+    padding-right: 26px;
+  }
+  .detail-name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 7px 10px;
+    font-size: 12.5px;
+    margin: 0;
+  }
+  .detail-grid dt {
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .detail-grid dd {
+    margin: 0;
+    word-break: break-all;
+  }
+  .cmd,
+  .path-text {
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .detail-section {
+    margin-top: var(--sp-4);
+  }
+  .detail-section-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .conn-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .conn-list li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding: 4px 7px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    font-size: 11.5px;
+  }
+  .conn-proto {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-muted);
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+  .conn-list .state {
+    flex-shrink: 0;
+    font-size: 10px;
+    padding: 1px 6px;
+  }
+  .conn-remote {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: var(--text-muted);
   }
   .mono {
     font-family: var(--font-mono);
