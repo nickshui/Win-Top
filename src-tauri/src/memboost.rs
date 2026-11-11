@@ -39,6 +39,21 @@ fn avail_mb() -> f64 {
     }
 }
 
+/// 当前物理内存占用百分比（0-100，来自 GlobalMemoryStatusEx 的 dwMemoryLoad）。
+pub fn memory_load_percent() -> u32 {
+    unsafe {
+        let mut ms = MEMORYSTATUSEX {
+            dwLength: size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        if GlobalMemoryStatusEx(&mut ms).is_ok() {
+            ms.dwMemoryLoad
+        } else {
+            0
+        }
+    }
+}
+
 /// 关键进程 denylist（小写）。这些不进"建议关闭"候选。
 fn deny_set() -> HashSet<&'static str> {
     [

@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport } from "../stores.js";
+  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport, autoBoostLast } from "../stores.js";
   import Modal from "../components/Modal.svelte";
 
   export let navigate = () => {};
@@ -19,6 +19,40 @@
   // 进程 / 启动项 摘要
   let procCount = 0;
   let startupEnabledCount = 0;
+
+  // ===== 自动加速 =====
+  let autoCfg = null;
+  let autoSaving = false;
+  $: lastAuto = $autoBoostLast ?? autoCfg?.last ?? null;
+
+  async function loadAutoBoost() {
+    try { autoCfg = await invoke("get_auto_boost"); } catch (e) { autoCfg = null; }
+  }
+
+  async function saveAutoBoost(enabled, threshold) {
+    autoSaving = true;
+    try {
+      autoCfg = await invoke("set_auto_boost", { enabled, threshold });
+      pushToast(enabled ? `自动加速已开启：内存 ≥ ${autoCfg.threshold}% 时自动释放` : "自动加速已关闭", "ok");
+    } catch (e) {
+      pushToast("保存设置失败：" + e, "error");
+    } finally { autoSaving = false; }
+  }
+
+  function toggleAutoBoost() {
+    if (autoCfg && !autoSaving) saveAutoBoost(!autoCfg.enabled, autoCfg.threshold);
+  }
+
+  function onThresholdChange(e) {
+    const t = Number(e.currentTarget.value);
+    if (autoCfg && !autoSaving && t !== autoCfg.threshold) saveAutoBoost(autoCfg.enabled, t);
+  }
+
+  const fmtTime = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
 
   $: memLoad = $metrics?.mem_load ?? 0;
   $: sysVol = ($diskReport?.volumes ?? []).find((v) => /^c/i.test(v.drive)) ?? ($diskReport?.volumes ?? [])[0] ?? null;
@@ -155,9 +189,9 @@
     if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
     return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
   };
-  const locLabel = (l) => ({ "HKCU-Run": "用户注册表", "HKLM-Run": "系统注册表", "User-Folder": "用户启动文件夹", "Common-Folder": "公共启动文件夹" })[l] || l;
+  const locLabel = (l) => ({ "HKCU-Run": "用户注册表", "HKLM-Run": "系统注册表", "HKLM-Run32": "系统注册表(32位)", "User-Folder": "用户启动文件夹", "Common-Folder": "公共启动文件夹", "UWP-Startup": "商店应用" })[l] || l;
 
-  onMount(() => { loadStartup(); loadHomeSummary(); });
+  onMount(() => { loadStartup(); loadHomeSummary(); loadAutoBoost(); });
 </script>
 
 {#if !$elevated}
@@ -202,6 +236,47 @@
     {#if boostDone && lastBoost}
       <p class="boost-result">本次释放磁盘 <b>{fmtBytes(lastBoost.freedBytes)}</b> · 内存 <b>{lastBoost.freedMb.toFixed(0)} MB</b></p>
     {/if}
+  </div>
+
+  <div class="auto-card">
+    <div class="auto-head">
+      <div>
+        <h3 class="boost-title">自动加速</h3>
+        <p class="boost-sub">内存持续 45 秒高于阈值时自动释放（仅内存，不删文件）；触发后至少 10 分钟不重复，连续低收益时自动延长；全屏、电池、磁盘繁忙时暂停</p>
+      </div>
+      <button
+        class="toggle-switch"
+        class:on={autoCfg?.enabled}
+        class:pending={autoSaving}
+        on:click={toggleAutoBoost}
+        disabled={!autoCfg || autoSaving}
+        aria-label={autoCfg?.enabled ? "关闭自动加速" : "开启自动加速"}
+      >
+        <span class="toggle-knob"></span>
+      </button>
+    </div>
+    <div class="auto-row">
+      <label class="auto-label">
+        触发阈值
+        <select
+          class="auto-select"
+          value={autoCfg?.threshold ?? 85}
+          on:change={onThresholdChange}
+          disabled={!autoCfg || autoSaving}
+        >
+          {#each [70, 75, 80, 85, 90, 95] as t}
+            <option value={t}>{t}%</option>
+          {/each}
+        </select>
+      </label>
+      <span class="auto-last">
+        {#if lastAuto}
+          上次自动加速 <b class="mono">{fmtTime(lastAuto.ts_ms)}</b> · 释放 <b class="mono">{Math.round(lastAuto.freed_mb)} MB</b>
+        {:else}
+          {autoCfg?.enabled ? "尚未触发（本次运行内）" : "已关闭"}
+        {/if}
+      </span>
+    </div>
   </div>
 
   <div class="entry-grid">
@@ -315,6 +390,7 @@
 
 <!-- ===== 开机启动 ===== -->
 {:else if tab === "startup"}
+  <p class="startup-hint">覆盖注册表 Run（含 32 位）、启动文件夹与商店应用启动任务，与任务管理器「启动应用」对齐。</p>
   <div class="table-wrap">
     <table>
       <thead><tr><th class="col-name">名称</th><th>位置</th><th class="col-cmd">命令</th><th class="col-sw">状态</th></tr></thead>
@@ -404,6 +480,15 @@
   .boost-result { margin: var(--sp-3) 0 0; font-size: 13px; color: var(--text-muted); text-align: center; }
   .boost-result b { color: var(--text); }
 
+  /* 自动加速 */
+  .auto-card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: var(--sp-4) var(--sp-6); margin-bottom: var(--sp-4); }
+  .auto-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); }
+  .auto-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); margin-top: var(--sp-3); flex-wrap: wrap; }
+  .auto-label { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 8px; }
+  .auto-select { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: inherit; font-size: 13px; padding: 4px 8px; }
+  .auto-last { font-size: 13px; color: var(--text-muted); }
+  .auto-last b { color: var(--text); font-weight: 600; }
+
   /* 加速中心：功能宫格 */
   .entry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--sp-3); }
   .entry { text-align: left; display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text); font-family: inherit; cursor: pointer; transition: border-color 0.15s ease, background 0.15s ease; }
@@ -451,6 +536,7 @@
   .clean-result { margin-top: var(--sp-3); padding: var(--sp-3); font-size: 14px; }
 
   /* 表 */
+  .startup-hint { margin: 0 0 var(--sp-3); font-size: 12px; color: var(--text-muted); }
   .table-wrap { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   thead th { position: sticky; top: 0; background: var(--surface-2); text-align: left; padding: 10px 14px; font-weight: 500; color: var(--text-muted); white-space: nowrap; }

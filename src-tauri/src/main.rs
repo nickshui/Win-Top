@@ -5,6 +5,8 @@
 //! 后续扩展：网络端口、磁盘 SMART、ETW 事件流。
 
 #[cfg(target_os = "windows")]
+mod autoboost;
+#[cfg(target_os = "windows")]
 mod collector;
 #[cfg(target_os = "windows")]
 mod disk;
@@ -68,6 +70,12 @@ mod app_score;
 mod uninstall;
 #[cfg(target_os = "windows")]
 mod update;
+
+#[cfg(target_os = "windows")]
+use tauri::{
+    CustomMenuItem, Manager, RunEvent, SystemTray, SystemTrayEvent, SystemTrayMenu,
+    SystemTrayMenuItem,
+};
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
@@ -291,8 +299,30 @@ fn suggest_background() -> Vec<memboost::BgProc> {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn list_startup() -> Vec<startup::StartupItem> {
-    startup::list_startup()
+fn get_auto_boost() -> autoboost::AutoBoostState {
+    autoboost::get_state()
+}
+
+/// 前端挂载完成后调用，用于诊断「WebView 已创建但页面未渲染」类白屏。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn log_ui_ready() {
+    log_startup("ui ready: frontend mounted");
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn set_auto_boost(enabled: bool, threshold: u8) -> Result<autoboost::AutoBoostState, String> {
+    autoboost::set_config(enabled, threshold)
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn list_startup() -> Vec<startup::StartupItem> {
+    // 含 shell:AppsFolder 枚举（数百项），必须离开主线程
+    tauri::async_runtime::spawn_blocking(startup::list_startup)
+        .await
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
@@ -376,8 +406,10 @@ fn set_cleanup_schedule(hours: u64) -> Result<String, String> {
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
-fn run_health_check() -> Result<health_check::HealthReport, String> {
-    health_check::run_health_check()
+async fn run_health_check() -> Result<health_check::HealthReport, String> {
+    tauri::async_runtime::spawn_blocking(health_check::run_health_check)
+        .await
+        .unwrap_or_else(|_| Err("体检任务异常退出".to_string()))
 }
 
 #[cfg(target_os = "windows")]
@@ -500,17 +532,190 @@ async fn undo_removal(undo_token: String) -> Result<String, String> {
         .unwrap_or_else(|_| Err("撤销任务异常退出".to_string()))
 }
 
+/// 托盘常驻：显示主窗口（从隐藏/最小化恢复并置前）。
+#[cfg(target_os = "windows")]
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 单实例互斥体（句柄存全局，供「以管理员重启」交接时主动释放）
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+static INSTANCE_MUTEX: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+fn store_instance_mutex(handle: windows::Win32::Foundation::HANDLE) {
+    INSTANCE_MUTEX.store(
+        handle.0 as isize,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+/// 释放单实例互斥体。提权重启前必须调用：否则新提权实例会误判「已有实例」，
+/// 找到旧窗口就自我退出（表现为「管理员重启没反应、应用直接没了」）。
+#[cfg(target_os = "windows")]
+pub(crate) fn release_single_instance() {
+    let raw = INSTANCE_MUTEX.swap(0, std::sync::atomic::Ordering::SeqCst);
+    if raw != 0 {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(
+                raw as *mut core::ffi::c_void,
+            ));
+        }
+    }
+}
+
+/// 重新获取单实例互斥体（提权重启被取消时的回滚）。
+#[cfg(target_os = "windows")]
+pub(crate) fn reacquire_single_instance() {
+    use windows::core::w;
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::System::Threading::CreateMutexW;
+    unsafe {
+        if let Ok(handle) = CreateMutexW(None, BOOL(1), w!("WinTop_SingleInstance")) {
+            store_instance_mutex(handle);
+        }
+    }
+}
+
+/// 单实例守卫：托盘常驻后再次双击 exe 应唤起已有窗口，而不是开第二份。
+/// 必须在便携版更新助手接管之后调用（助手进程也会进入 main，不能把它挡掉）。
+#[cfg(target_os = "windows")]
+fn ensure_single_instance() {
+    use windows::core::{w, PCWSTR};
+    use windows::Win32::Foundation::{GetLastError, BOOL, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_SHOW,
+    };
+    unsafe {
+        // 句柄故意不由 Rust drop 处理：存入全局，进程存活期间一直持有；
+        // 提权重启前由 release_single_instance() 主动关闭。
+        match CreateMutexW(None, BOOL(1), w!("WinTop_SingleInstance")) {
+            Ok(handle) => store_instance_mutex(handle),
+            Err(_) => return, // 创建失败（极少见）时不做单实例限制
+        }
+        if GetLastError() != ERROR_ALREADY_EXISTS {
+            return;
+        }
+        // 已有实例：尝试把它的窗口唤到前台。
+        // 首次冷启动的窗口可能要 1~2 秒才创建，因此最多等 3 秒；
+        // 仍唤不起（旧实例卡死 / 处于不同提权级）就继续作为独立实例运行，
+        // 避免「双击没反应」。
+        for _ in 0..30 {
+            if let Ok(hwnd) = FindWindowW(PCWSTR::null(), w!("Win-Top")) {
+                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = SetForegroundWindow(hwnd);
+                if IsWindowVisible(hwnd).as_bool() {
+                    std::process::exit(0);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+/// 启动过程日志（诊断白屏/卡死；`%LOCALAPPDATA%\WinTop\startup.log`，超过 256 KB 自动截断）。
+#[cfg(target_os = "windows")]
+fn log_startup(msg: &str) {
+    use std::io::Write;
+    let dir = crate::history_store::base_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("startup.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 256 * 1024 {
+            let _ = std::fs::write(&path, b"");
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(
+            f,
+            "[{}] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            msg
+        );
+    }
+}
+
+/// 主窗口的 WebView2 是否已就绪（自动加速等后台任务在此之前不应干扰启动）。
+/// 主窗口由 tauri.conf.json 声明、在 setup 之前创建，因此 setup 开始时即已就绪。
+#[cfg(target_os = "windows")]
+static WEBVIEW_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+pub(crate) fn webview_ready() -> bool {
+    WEBVIEW_READY.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
+    log_startup(&format!(
+        "main start: elevated={} args={:?}",
+        privilege::is_elevated(),
+        std::env::args().collect::<Vec<_>>()
+    ));
     // 便携版自动更新：更新助手进程会在 Tauri 初始化前接管，替换 exe 后退出。
-    // 必须在任何 Tauri/窗口初始化之前。
+    // 必须在任何 Tauri/窗口初始化之前，也必须在单实例守卫之前。
     if let Some(code) = update::run_helper_if_requested() {
         std::process::exit(code);
     }
+    ensure_single_instance();
+    log_startup("single-instance check done");
 
-    tauri::Builder::default()
+    let tray = SystemTray::new()
+        .with_tooltip("Win-Top：关闭窗口后在后台运行")
+        .with_icon(tauri::Icon::Raw(include_bytes!("../icons/icon.png").to_vec()))
+        .with_menu(
+            SystemTrayMenu::new()
+                .add_item(CustomMenuItem::new("show", "显示主界面"))
+                .add_item(CustomMenuItem::new("boost", "立即加速"))
+                .add_native_item(SystemTrayMenuItem::Separator)
+                .add_item(CustomMenuItem::new("quit", "退出")),
+        );
+
+    let app = tauri::Builder::default()
+        .system_tray(tray)
+        .on_system_tray_event(|app, event| match event {
+            SystemTrayEvent::MenuItemClick { id, .. } => match id.as_str() {
+                "show" => show_main_window(app),
+                "boost" => {
+                    let handle = app.clone();
+                    std::thread::spawn(move || {
+                        let r = memboost::memory_boost();
+                        let _ = handle.tray_handle().set_tooltip(&format!(
+                            "Win-Top：手动加速完成，释放 {:.0} MB",
+                            r.freed_mb
+                        ));
+                        let _ = handle.emit_all(
+                            "boost-result",
+                            serde_json::json!({
+                                "source": "tray",
+                                "freed_mb": r.freed_mb,
+                                "trimmed_count": r.trimmed_count,
+                            }),
+                        );
+                    });
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            },
+            SystemTrayEvent::LeftClick { .. } | SystemTrayEvent::DoubleClick { .. } => {
+                show_main_window(app)
+            }
+            _ => {}
+        })
         .setup(|app| {
             let handle = app.handle();
+            // 主窗口由 tauri.conf.json 声明，在 setup 之前已创建完成（WebView2 已就绪）
+            WEBVIEW_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+            log_startup("setup: start");
             // 上次便携版更新留下的 .old 备份（新进程退出前一直被占用）
             update::cleanup_old_binary();
             std::thread::spawn({
@@ -527,14 +732,17 @@ fn main() {
             gpu_proc::start(handle.clone());
             // 历史趋势持久化（定长追加 + 保留/淘汰；磁盘不可用时自动退回纯内存）
             history_store::start(handle.clone());
+            // 自动加速：内存达阈值时自动裁剪工作集（设置持久化）
+            autoboost::start(handle.clone());
             // 初始化定时清理调度器
             scheduler::init_scheduler(handle.clone());
             Ok(())
         })
-        // 退出前让历史写线程 flush + sync（最多丢最后 15 秒）
         .on_window_event(|event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event.event() {
-                history_store::shutdown();
+            // 关闭按钮 = 隐藏到托盘，不退出进程；真正退出走托盘菜单
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
+                api.prevent_close();
+                let _ = event.window().hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -558,6 +766,9 @@ fn main() {
             clean_junk,
             memory_boost,
             suggest_background,
+            get_auto_boost,
+            set_auto_boost,
+            log_ui_ready,
             list_startup,
             set_startup_enabled,
             get_history,
@@ -593,8 +804,16 @@ fn main() {
             remove_residue,
             undo_removal
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Win-Top");
+        .build(tauri::generate_context!())
+        .expect("error while building Win-Top");
+
+    log_startup("app: entering event loop");
+    app.run(|_app_handle, event| {
+        if let RunEvent::Exit = event {
+            // 兜底：无论从哪条路径退出（托盘退出/更新重启/系统注销），都让历史写线程落盘
+            history_store::shutdown();
+        }
+    });
 }
 
 #[cfg(not(target_os = "windows"))]

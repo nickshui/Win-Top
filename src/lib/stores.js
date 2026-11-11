@@ -195,6 +195,27 @@ export function startCleanupNotifications() {
   return () => { if (un) un(); };
 }
 
+// ===== 自动加速 / 托盘加速 =====
+// auto-boost：后端内存达阈值自动触发；boost-result：托盘菜单「立即加速」。
+export const autoBoostLast = writable(null);
+
+export function startBoostNotifications() {
+  let un1, un2;
+  listen("auto-boost", (e) => {
+    const p = e.payload;
+    autoBoostLast.set(p);
+    pushToast(`自动加速：内存 ${p.mem_load}%，已释放 ${Math.round(p.freed_mb)} MB`, "ok");
+  }).then((u) => (un1 = u));
+  listen("boost-result", (e) => {
+    const p = e.payload;
+    pushToast(`加速完成：释放内存 ${Math.round(p.freed_mb)} MB`, "ok");
+  }).then((u) => (un2 = u));
+  return () => {
+    if (un1) un1();
+    if (un2) un2();
+  };
+}
+
 // ===== AI 助手：采集真实系统快照作为对话上下文 =====
 // 汇总当前 metrics、进程 TOP、磁盘容量，生成结构化文本供 LLM 参考。
 // 采集系统快照：仅读取后台常驻采集的 store（纯内存、零阻塞），

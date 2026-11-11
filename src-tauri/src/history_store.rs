@@ -139,19 +139,24 @@ fn set_status(f: impl FnOnce(&mut HistoryStatus)) {
 /// 便携版标记文件名：与 exe 同级存在该文件即视为便携版。
 const PORTABLE_MARKER: &str = "wintop.portable";
 
-/// 纯函数：解析落盘目录。不创建任何东西，可在任何线程任意调用。
-fn resolve_dir() -> PathBuf {
+/// 纯函数：解析落盘根目录（数据根，不含 history 子目录）。
+/// 安装版 `%LOCALAPPDATA%\WinTop`；便携版（exe 同级存在 `wintop.portable`）为 `<exe 目录>\WinTop-data`。
+/// 不创建任何东西，可在任何线程任意调用。设置等其他模块也复用此根目录。
+pub(crate) fn base_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if dir.join(PORTABLE_MARKER).exists() {
                 // 便携版：自包含，绝不写宿主机 %LOCALAPPDATA%
-                return dir.join("WinTop-data").join("history");
+                return dir.join("WinTop-data");
             }
         }
     }
-    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-        .join("WinTop")
-        .join("history")
+    PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("WinTop")
+}
+
+/// 纯函数：解析落盘目录。不创建任何东西，可在任何线程任意调用。
+fn resolve_dir() -> PathBuf {
+    base_dir().join("history")
 }
 
 fn free_bytes(dir: &Path) -> Option<u64> {

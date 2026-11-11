@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from "svelte";
-  import { startMetrics, startEvents, startNetTraffic, startCleanupNotifications, startDiskIo, startGpuProc } from "./lib/stores.js";
+  import { invoke } from "@tauri-apps/api/tauri";
+  import { startMetrics, startEvents, startNetTraffic, startCleanupNotifications, startDiskIo, startGpuProc, startBoostNotifications } from "./lib/stores.js";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import TopBar from "./lib/components/TopBar.svelte";
   import Overview from "./lib/views/Overview.svelte";
@@ -23,14 +24,18 @@
   let stopCleanupNotif;
   let stopDiskIo;
   let stopGpuProc;
+  let stopBoostNotif;
 
   onMount(() => {
+    // 诊断：页面真正渲染出来才写这条日志（区分「WebView 创建成功但页面空白」与「初始化卡死」）
+    invoke("log_ui_ready").catch(() => {});
     stopMetrics = startMetrics();
     stopEvents = startEvents();
     stopNetTraffic = startNetTraffic();
     stopCleanupNotif = startCleanupNotifications();
     stopDiskIo = startDiskIo();
     stopGpuProc = startGpuProc();
+    stopBoostNotif = startBoostNotifications();
   });
   onDestroy(() => {
     if (stopMetrics) stopMetrics();
@@ -39,6 +44,7 @@
     if (stopCleanupNotif) stopCleanupNotif();
     if (stopDiskIo) stopDiskIo();
     if (stopGpuProc) stopGpuProc();
+    if (stopBoostNotif) stopBoostNotif();
   });
 
   const meta = {

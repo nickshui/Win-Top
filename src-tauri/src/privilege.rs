@@ -37,6 +37,10 @@ pub fn relaunch_as_admin() -> Result<(), String> {
     let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(once(0)).collect();
     let verb: Vec<u16> = "runas".encode_utf16().chain(once(0)).collect();
 
+    // 先释放单实例互斥体：新提权实例若看到本进程的锁，会误判「已有实例」，
+    // 唤起旧窗口后自我退出——表现为「管理员重启没反应、应用直接消失」。
+    crate::release_single_instance();
+
     let result = unsafe {
         ShellExecuteW(
             HWND::default(),
@@ -47,8 +51,9 @@ pub fn relaunch_as_admin() -> Result<(), String> {
             SW_SHOWNORMAL,
         )
     };
-    // ShellExecuteW: 返回值 > 32 表示成功
+    // ShellExecuteW: 返回值 > 32 表示成功；失败（通常是被 UAC 取消）时回滚互斥体
     if (result.0 as isize) <= 32 {
+        crate::reacquire_single_instance();
         return Err("提权启动失败（可能被 UAC 取消）".to_string());
     }
 

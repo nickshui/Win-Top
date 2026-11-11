@@ -11,7 +11,7 @@ reqwest = { version = "0.11", features = ["blocking"] }
 sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
-tauri = { version = "1.5", features = ["api-all"] }
+tauri = { version = "1.5", features = ["api-all", "system-tray", "icon-png"] }
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dxgi",
@@ -32,6 +32,8 @@ windows = { version = "0.58", features = [
   "Win32_System_IO",
   "Win32_System_Ioctl",
   "Win32_System_Com",
+  "Win32_System_Power",
+  "Win32_Graphics_Gdi",
 ] }
 netstat2 = "0.9"
 wmi = "0.14"
