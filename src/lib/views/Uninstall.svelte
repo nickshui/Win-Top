@@ -19,6 +19,8 @@
   let search = "";
   let sortKey = "score";
   let sortDir = "desc";
+  let filters = new Set();
+  let icons = new Map(); // app id -> data URL
 
   let workflow = createWorkflow();
   let selectedPaths = new Set();
@@ -33,7 +35,7 @@
   let undoing = false;
   let footprintCache = new Map();
 
-  $: filtered = filterSort(apps, search, sortKey, sortDir);
+  $: filtered = filterSort(apps, search, sortKey, sortDir, filters);
   $: flowLocked =
     ["preparing", "launching", "waiting", "scanning", "review", "cleaning", "complete"].includes(workflow.phase) ||
     (workflow.phase === "error" && workflow.recoverPhase === "waiting");
@@ -52,6 +54,7 @@
         const refreshed = next.find((item) => item.entry.id === workflow.app.entry.id);
         if (refreshed) workflow = { ...workflow, app: refreshed };
       }
+      loadIcons(next);
     } catch (error) {
       listError = "读取应用清单失败：" + error;
       pushToast(listError, "error");
@@ -60,14 +63,43 @@
     }
   }
 
+  // 图标按需批量提取；失败的应用回退为首字母头像（不影响列表可用性）。
+  async function loadIcons(list) {
+    try {
+      const items = list.map(({ entry }) => ({
+        id: entry.id,
+        display_icon: entry.display_icon || "",
+        install_location: entry.install_location || "",
+      }));
+      if (items.length === 0) return;
+      const map = await invoke("get_app_icons", { items });
+      icons = new Map(Object.entries(map || {}));
+    } catch (e) {
+      // 图标是增强信息，失败静默
+    }
+  }
+
   onMount(load);
   onDestroy(stopPolling);
 
-  function filterSort(list, query, key, direction) {
+  function filterSort(list, query, key, direction, activeFilters) {
     const needle = query.trim().toLowerCase();
-    const out = needle
-      ? list.filter((item) => `${item.entry.name} ${item.entry.publisher}`.toLowerCase().includes(needle))
+    let out = needle
+      ? list.filter((item) =>
+          `${item.entry.name} ${item.entry.publisher} ${item.entry.version} ${item.entry.install_location}`
+            .toLowerCase()
+            .includes(needle)
+        )
       : list;
+    if (activeFilters.size > 0) {
+      out = out.filter((item) => {
+        if (activeFilters.has("autostart") && !item.score.autostart) return false;
+        if (activeFilters.has("caution") && !item.score.caution) return false;
+        if (activeFilters.has("unused") && item.score.last_used_secs != null) return false;
+        if (activeFilters.has("large") && item.entry.estimated_size_kb < 1024 * 1024) return false;
+        return true;
+      });
+    }
     const sign = direction === "asc" ? 1 : -1;
     const value = (item) =>
       key === "name"
@@ -76,11 +108,45 @@
         ? item.entry.estimated_size_kb
         : key === "lastUsed"
         ? item.score.last_used_secs ?? 0
+        : key === "installed"
+        ? parseInt(item.entry.install_date, 10) || 0
         : item.score.removal_recommendation;
     return [...out].sort((left, right) => {
       const a = value(left);
       const b = value(right);
       return a < b ? -1 * sign : a > b ? 1 * sign : 0;
+    });
+  }
+
+  function toggleFilter(key) {
+    if (flowLocked) return;
+    const next = new Set(filters);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    filters = next;
+  }
+
+  // 列表键盘导航：↑/↓/Home/End 切换选中应用
+  function onRowKeydown(event) {
+    if (flowLocked) return;
+    const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+    if (!keys.includes(event.key) || filtered.length === 0) return;
+    event.preventDefault();
+    const current = filtered.findIndex((item) => item.entry.id === workflow.app?.entry.id);
+    let nextIndex;
+    if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = filtered.length - 1;
+    else nextIndex = current < 0 ? 0 : Math.min(filtered.length - 1, Math.max(0, current + (event.key === "ArrowDown" ? 1 : -1)));
+    const target = filtered[nextIndex];
+    selectApp(target);
+    requestAnimationFrame(() => {
+      const rows = document.querySelectorAll("[data-app-id]");
+      for (const row of rows) {
+        if (row.dataset.appId === target.entry.id) {
+          row.scrollIntoView({ block: "nearest" });
+          break;
+        }
+      }
     });
   }
 
@@ -324,6 +390,17 @@
   };
   const fmtKb = (value) => fmtBytes((value || 0) * 1024);
   const scoreClass = (value) => (value >= 70 ? "danger" : value >= 40 ? "warn" : "ok");
+  // "YYYYMMDD" -> "YYYY-MM-DD"，非法值返回空串
+  const fmtInstallDate = (raw) => {
+    const s = String(raw || "").trim();
+    return /^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : "";
+  };
+  const iconInitial = (name) => (name || "?").trim().charAt(0).toUpperCase();
+  const iconHue = (name) => {
+    let h = 0;
+    for (const ch of name || "") h = (h * 31 + ch.codePointAt(0)) % 360;
+    return h;
+  };
 </script>
 
 <div class="uninstall-page">
@@ -341,13 +418,20 @@
         <button class="ghost sm" on:click={load} disabled={loading || flowLocked}>刷新</button>
       </div>
       <div class="sort-row" aria-label="应用排序">
-        {#each [["score", "推荐度"], ["size", "体积"], ["lastUsed", "最近用"], ["name", "名称"]] as [key, label]}
+        {#each [["score", "推荐卸载度"], ["size", "体积"], ["lastUsed", "最近用"], ["installed", "安装日期"], ["name", "名称"]] as [key, label]}
           <button class="sort" class:active={sortKey === key} on:click={() => setSort(key)} disabled={flowLocked}>
             {label}{#if sortKey === key}<span class="arrow">{sortDir === "asc" ? "↑" : "↓"}</span>{/if}
           </button>
         {/each}
       </div>
-      <div class="rows" aria-busy={loading}>
+      <div class="filter-row" aria-label="筛选">
+        {#each [["autostart", "仅自启"], ["caution", "仅谨慎"], ["unused", "无使用记录"], ["large", "≥1GB"]] as [key, label]}
+          <button class="filter-chip" class:on={filters.has(key)} on:click={() => toggleFilter(key)} disabled={flowLocked} aria-pressed={filters.has(key)}>
+            {label}
+          </button>
+        {/each}
+      </div>
+      <div class="rows" role="listbox" aria-busy={loading} tabindex="0" on:keydown={onRowKeydown} aria-label="应用列表（方向键切换）">
         {#if loading}
           <div class="empty">加载中…</div>
         {:else if listError}
@@ -361,8 +445,16 @@
               class:sel={workflow.app?.entry.id === app.entry.id}
               class:locked={flowLocked && workflow.app?.entry.id !== app.entry.id}
               aria-disabled={flowLocked && workflow.app?.entry.id !== app.entry.id}
+              data-app-id={app.entry.id}
               on:click={() => selectApp(app)}
             >
+              <span class="app-icon">
+                {#if icons.get(app.entry.id)}
+                  <img src={icons.get(app.entry.id)} alt="" />
+                {:else}
+                  <span class="icon-fallback" style="--h:{iconHue(app.entry.name)}">{iconInitial(app.entry.name)}</span>
+                {/if}
+              </span>
               <span class="score-pill {scoreClass(app.score.removal_recommendation)}">{app.score.removal_recommendation}</span>
               <span class="row-body">
                 <span class="row-top">
@@ -371,15 +463,20 @@
                   {#if app.score.autostart}<span class="chip">自启</span>{/if}
                 </span>
                 <span class="row-sub">
-                  <span class="mono">{fmtKb(app.entry.estimated_size_kb)}</span><span>·</span><span>{app.score.last_used_label}</span>
+                  {#if app.entry.version}<span class="mono">v{app.entry.version}</span><span>·</span>{/if}
+                  {#if fmtInstallDate(app.entry.install_date)}<span class="mono">{fmtInstallDate(app.entry.install_date)}</span><span>·</span>{/if}
+                  <span class="mono">{app.entry.estimated_size_kb > 0 ? fmtKb(app.entry.estimated_size_kb) : "—"}</span><span>·</span><span>{app.score.last_used_label}</span>
                   {#if app.entry.publisher}<span>·</span><span class="ellip">{app.entry.publisher}</span>{/if}
                 </span>
+                {#if app.score.reasons?.length}
+                  <span class="row-reason" title={app.score.reasons.join("；")}>{app.score.reasons[0]}</span>
+                {/if}
               </span>
             </button>
           {/each}
         {/if}
       </div>
-      <div class="list-foot muted">{filtered.length} 个应用</div>
+      <div class="list-foot muted">{filtered.length} / {apps.length} 个应用 · 仅覆盖注册表卸载项（ARP），MSIX/Store 应用暂不在清单内</div>
     </div>
 
     <main class="ua-detail">
@@ -444,11 +541,21 @@
   .search { min-width: 0; flex: 1; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); font-family: inherit; font-size: 13px; }
   .search:focus { outline: none; border-color: var(--accent); }
   .search:focus-visible, button:focus-visible { outline: 2px solid #a5b4fc; outline-offset: 2px; }
-  .sort-row { display: flex; gap: 2px; padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border); }
-  .sort { flex: 1; padding: 4px 6px; border: none; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-family: inherit; font-size: 12px; cursor: pointer; }
+  .sort-row { display: flex; flex-wrap: wrap; row-gap: 2px; gap: 2px; padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border); }
+  .sort { flex: 0 0 auto; padding: 4px 7px; border: none; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-family: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
   .sort:hover, .sort.active { background: var(--surface-2); color: var(--text); }
   .arrow { margin-left: 2px; }
+  .filter-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px var(--sp-3); border-bottom: 1px solid var(--border); }
+  .filter-chip { padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text-muted); font-family: inherit; font-size: 11px; cursor: pointer; transition: border-color .15s ease, background .15s ease, color .15s ease; }
+  .filter-chip:hover { border-color: var(--accent); color: var(--text); }
+  .filter-chip.on { border-color: var(--accent); background: rgba(99, 102, 241, 0.16); color: var(--text); }
   .rows { flex: 1; min-height: 0; overflow-y: auto; }
+  .rows:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .row { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 12px; border: none; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); font-family: inherit; cursor: pointer; text-align: left; }
+  .app-icon { width: 26px; height: 26px; flex-shrink: 0; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--surface-2); }
+  .app-icon img { width: 100%; height: 100%; object-fit: contain; }
+  .icon-fallback { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: #fff; background: hsl(var(--h, 220), 42%, 34%); }
+  .row-reason { display: block; margin-top: 2px; font-size: 10px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row { display: flex; align-items: center; gap: var(--sp-3); width: 100%; padding: 9px 12px; border: none; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); font-family: inherit; cursor: pointer; text-align: left; }
   .row:hover { background: var(--surface-2); }
   .row.sel { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
@@ -456,8 +563,9 @@
   .row-body { min-width: 0; flex: 1; }
   .row-top { display: flex; align-items: center; gap: 6px; }
   .row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
-  .row-sub { display: flex; align-items: center; gap: 5px; margin-top: 2px; color: var(--text-muted); font-size: 11px; }
-  .row-sub .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-sub { display: flex; align-items: center; gap: 5px; margin-top: 2px; color: var(--text-muted); font-size: 11px; white-space: nowrap; overflow: hidden; }
+  .row-sub > span { flex-shrink: 0; }
+  .row-sub .ellip { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .list-foot { padding: 6px 12px; border-top: 1px solid var(--border); font-size: 11px; }
   .score-pill { min-width: 30px; flex-shrink: 0; padding: 3px 6px; border-radius: var(--radius-sm); text-align: center; font: 700 13px var(--font-mono); }
   .score-pill.ok { color: var(--ok); background: rgba(34,197,94,.12); }

@@ -7,6 +7,8 @@
 #[cfg(target_os = "windows")]
 mod autoboost;
 #[cfg(target_os = "windows")]
+mod app_icon;
+#[cfg(target_os = "windows")]
 mod collector;
 #[cfg(target_os = "windows")]
 mod disk;
@@ -155,13 +157,58 @@ fn get_disk_report() -> disk::DiskReport {
     disk::report()
 }
 
+/// 构建扫描进度发射器：节流约 200ms，最后一次（scanned >= total）必定发出。
+#[cfg(target_os = "windows")]
+fn progress_emitter(
+    app: tauri::AppHandle,
+    target: String,
+    source: &'static str,
+) -> impl FnMut(u64, Option<u64>) {
+    let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    move |scanned, total| {
+        let finished = total.map(|t| scanned >= t).unwrap_or(false);
+        if !finished && last.elapsed() < std::time::Duration::from_millis(200) {
+            return;
+        }
+        last = std::time::Instant::now();
+        let percent = total
+            .filter(|t| *t > 0)
+            .map(|t| (scanned as f64 / t as f64 * 100.0).clamp(0.0, 100.0));
+        let _ = app.emit_all(
+            "scan-progress",
+            serde_json::json!({
+                "target": target,
+                "source": source,
+                "scanned": scanned,
+                "total": total,
+                "percent": percent,
+                "done": finished,
+            }),
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn scan_directory(dir_path: String, top_n: usize) -> disk_usage::UsageReport {
+async fn scan_directory(
+    app: tauri::AppHandle,
+    dir_path: String,
+    top_n: usize,
+) -> disk_usage::UsageReport {
     disk_usage::reset_cancel();
-    tauri::async_runtime::spawn_blocking(move || disk_usage::scan_directory(dir_path, top_n))
-        .await
-        .unwrap_or_else(|_| disk_usage::UsageReport {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut emit = progress_emitter(app, dir_path.clone(), "walk");
+        let report = disk_usage::scan_directory_with_progress(dir_path.clone(), top_n, &mut emit);
+        log_startup(&format!(
+            "scan_directory done: dir={} scanned={} dirs={} root={} source={}",
+            dir_path, report.scanned, report.dirs.len(), report.root_size, report.source
+        ));
+        report
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log_startup(&format!("scan_directory join error: {}", e));
+        disk_usage::UsageReport {
             large_files: vec![],
             dirs: vec![],
             scanned: 0,
@@ -169,38 +216,70 @@ async fn scan_directory(dir_path: String, top_n: usize) -> disk_usage::UsageRepo
             source: "walk".into(),
             elapsed_ms: 0,
             cancelled: false,
-        })
+            root_size: 0,
+        }
+    })
+}
+
+/// 把盘符规范化为卷根路径（保留冒号，去掉多余尾部反斜杠后补一个）。
+/// "C:" / "C:\\" → "C:\\"；绝不能剥掉冒号，否则会拼出相对路径 "C\"。
+#[cfg(target_os = "windows")]
+fn volume_root(drive: &str) -> String {
+    format!("{}\\", drive.trim().trim_end_matches('\\'))
 }
 
 /// 按盘符扫描整卷：优先走 MFT（需管理员、仅 NTFS），失败时回退到逐目录递归。
 #[cfg(target_os = "windows")]
 #[tauri::command]
-async fn scan_volume(drive: String, top_n: usize) -> disk_usage::UsageReport {
+async fn scan_volume(
+    app: tauri::AppHandle,
+    drive: String,
+    top_n: usize,
+) -> disk_usage::UsageReport {
     disk_usage::reset_cancel();
     tauri::async_runtime::spawn_blocking(move || {
-        match mft_scan::scan_volume(&drive, top_n) {
+        let drive_for_walk = drive.clone();
+        let mut emit = progress_emitter(app.clone(), drive.clone(), "mft");
+        let report = match mft_scan::scan_volume_with_progress(&drive, top_n, &mut |done, total| {
+            emit(done, Some(total))
+        }) {
             Ok(report) => report,
             Err(_) => {
                 // 回退：从盘根递归遍历（慢，但不依赖 MFT/权限）
-                // 注意：必须**先剥冒号、再剥尾部反斜杠**，然后补回一个 `\`。
-                // 曾经写成 trim_end_matches('\\').trim_end_matches(':')：对 "C:" 会先剥
-                // （无匹配）再剥冒号得 "C"，拼出相对路径 "C\"；随后 disk_usage 的
-                // root.exists() 为假，静默返回空报告。而 MFT 需提权，非管理员必走本分支。
-                let root = format!("{}\\", drive.trim().trim_end_matches(':').trim_end_matches('\\'));
-                disk_usage::scan_directory(root, top_n)
+                let root = volume_root(&drive_for_walk);
+                let mut emit = progress_emitter(app, drive_for_walk, "walk");
+                disk_usage::scan_directory_with_progress(root, top_n, &mut emit)
             }
-        }
+        };
+        log_startup(&format!(
+            "scan_volume done: scanned={} dirs={} root={} errors={} source={}",
+            report.scanned, report.dirs.len(), report.root_size, report.errors, report.source
+        ));
+        report
     })
     .await
-    .unwrap_or_else(|_| disk_usage::UsageReport {
-        large_files: vec![],
-        dirs: vec![],
-        scanned: 0,
-        errors: 0,
-        source: "walk".into(),
-        elapsed_ms: 0,
-        cancelled: false,
+    .unwrap_or_else(|e| {
+        log_startup(&format!("scan_volume join error: {}", e));
+        disk_usage::UsageReport {
+            large_files: vec![],
+            dirs: vec![],
+            scanned: 0,
+            errors: 0,
+            source: "walk".into(),
+            elapsed_ms: 0,
+            cancelled: false,
+            root_size: 0,
+        }
     })
+}
+
+/// 列出一个目录的直接文件（TreeSize 式展开时按需加载文件行）。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn list_dir_files(dir_path: String, limit: usize) -> Vec<disk_usage::DirFileEntry> {
+    tauri::async_runtime::spawn_blocking(move || disk_usage::list_dir_files(&dir_path, limit))
+        .await
+        .unwrap_or_default()
 }
 
 /// 请求取消正在进行的空间分析扫描（整卷或下钻）。
@@ -470,6 +549,17 @@ async fn restore_visual_fx() -> Result<String, String> {
 #[tauri::command]
 async fn list_installed_apps() -> Vec<app_inventory::AppEntry> {
     tauri::async_runtime::spawn_blocking(app_inventory::list_installed_apps)
+        .await
+        .unwrap_or_default()
+}
+
+/// 批量提取应用图标（data URL）。失败项不返回，前端用首字母兜底。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn get_app_icons(
+    items: Vec<app_icon::IconRequest>,
+) -> std::collections::HashMap<String, String> {
+    tauri::async_runtime::spawn_blocking(move || app_icon::resolve_icons(items))
         .await
         .unwrap_or_default()
 }
@@ -754,6 +844,7 @@ fn main() {
             get_disk_report,
             scan_directory,
             scan_volume,
+            list_dir_files,
             cancel_scan,
             network_checkup,
             probe_target,
@@ -796,6 +887,7 @@ fn main() {
             apply_visual_fx_preset,
             restore_visual_fx,
             list_installed_apps,
+            get_app_icons,
             resolve_footprint,
             list_apps_scored,
             uninstall_capability,
@@ -819,4 +911,16 @@ fn main() {
 #[cfg(not(target_os = "windows"))]
 fn main() {
     println!("Win-Top 仅支持 Windows 运行。");
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::volume_root;
+
+    #[test]
+    fn volume_root_keeps_drive_colon() {
+        assert_eq!(volume_root("C:"), "C:\\");
+        assert_eq!(volume_root("C:\\"), "C:\\");
+        assert_eq!(volume_root(" j: "), "j:\\");
+    }
 }

@@ -1,17 +1,22 @@
+<script context="module">
+  // 扫描结果缓存（模块级，切换视图后返回可恢复，避免重复扫描）
+  let scanCache = null;
+  // 进行中的扫描任务（切换视图再回来时可重新接上，避免并发重复扫描）
+  let scanJob = null;
+</script>
+
 <script>
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
   import { open as shellOpen } from "@tauri-apps/api/shell";
-  import { pushToast } from "../stores.js";
+  import { open as openDialog } from "@tauri-apps/api/dialog";
+  import { listen } from "@tauri-apps/api/event";
+  import { pushToast, elevated, relaunchAdmin } from "../stores.js";
 
   let tab = "overview";
+  let expandedDisk = -1; // 展开详情的物理盘 index
 
-  function selectTab(next) {
-    tab = next;
-    if (next === "analyzer") analyzerVisited = true;
-  }
-
-  // ===== Volume + Disk (existing) =====
+  // ===== 分区与物理磁盘 =====
   let volumes = [];
   let disks = [];
   let smartNote = "";
@@ -45,58 +50,168 @@
   onMount(() => {
     refresh();
     timer = setInterval(refresh, 15000);
+    if (scanJob) {
+      // 扫描仍在进行：重新接上任务状态
+      analysisTarget = { kind: scanJob.kind, target: scanJob.target };
+      scanDrive = scanJob.kind === "volume" ? scanJob.target : "";
+      scanLoading = true;
+      scanProgress = null;
+      scanJob.promise
+        .then(() => {
+          scanLoading = false;
+          restoreCache();
+        })
+        .catch((e) => {
+          scanLoading = false;
+          scanError = String(e);
+        });
+    } else {
+      restoreCache();
+    }
+    listen("scan-progress", (e) => {
+      if (!scanLoading) return;
+      const p = e.payload || {};
+      if (analysisTarget && p.target !== analysisTarget.target) return;
+      scanProgress = p;
+    }).then((u) => (unlistenProgress = u));
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    clearInterval(timer);
+    if (unlistenProgress) unlistenProgress();
+  });
 
   const sev = (v) => (v >= 90 ? "danger" : v >= 75 ? "warn" : "ok");
 
-  // ===== Space Analyzer =====
+  function selectTab(next) {
+    tab = next;
+  }
+
+  // ===== 空间分析 =====
+  // 扫描目标：{ kind: "volume"|"dir", target: "C:" | "D:\\path" }
+  let analysisTarget = null;
   let scanDrive = "";
   let scanLoading = false;
   let scanResult = null;
   let scanError = null;
   let cancelRequested = false;
+  let scanProgress = null;
+  let scanAt = 0;
+  let unlistenProgress = null;
 
-  let analyzerVisited = false;
-  let autoScanStarted = false;
+  // TreeSize 式行内展开
+  let expanded = new Set([""]);
+  let childrenCache = new Map(); // parentRel -> DirSummary[]
+  let sortedDirs = null; // 按路径排序的引用副本（前缀二分查找子目录，省内存）
+  let filesCache = new Map(); // rel -> DirFileEntry[]
+  let filesLoading = new Set();
 
-  // 首次进入"空间分析"标签时自动扫描默认盘（系统盘优先）。此前这里只是把
-  // scanDrive 设成 "C:" 却从未真正调用扫描，导致默认停在一个看起来已选中
-  // C 盘、实际从未扫描过的空白页——本盘的分析永远不会自己出现。
-  $: if (analyzerVisited && !autoScanStarted && volumes.length > 0) {
-    autoScanStarted = true;
-    const sys = volumes.find((v) => v.drive?.toUpperCase().startsWith("C")) ?? volumes[0];
-    scanVolume(sys.drive);
+  function restoreCache() {
+    if (!scanCache) return;
+    scanResult = scanCache.result;
+    analysisTarget = { kind: scanCache.kind, target: scanCache.target };
+    scanDrive = scanCache.kind === "volume" ? scanCache.target : "";
+    scanAt = scanCache.at;
+    expanded = new Set([""]);
+    childrenCache = new Map();
+    sortedDirs = null;
+    filesCache = new Map();
+    filesLoading = new Set();
+    loadFiles("");
   }
 
-  async function scanVolume(drive) {
+  function clearResult() {
+    scanResult = null;
+    scanError = null;
+    scanAt = 0;
+    expanded = new Set([""]);
+    childrenCache = new Map();
+    sortedDirs = null;
+    filesCache = new Map();
+    filesLoading = new Set();
+  }
+
+  // 点分区卡片：进入空间分析并预选该盘（不自动扫描）
+  function openAnalyzerForDrive(drive) {
+    selectTab("analyzer");
+    if (scanCache && scanCache.kind === "volume" && scanCache.target === drive) {
+      restoreCache();
+      return;
+    }
+    clearResult();
     scanDrive = drive;
+    analysisTarget = { kind: "volume", target: drive };
+  }
+
+  function selectDrive(drive) {
+    if (scanLoading) return;
+    scanDrive = drive;
+    analysisTarget = { kind: "volume", target: drive };
+    if (!(scanResult && scanCache && scanCache.kind === "volume" && scanCache.target === drive)) {
+      clearResult();
+    }
+  }
+
+  async function startScan() {
+    if (scanLoading) return;
+    if (!analysisTarget) return;
+    await doScan(analysisTarget.kind, analysisTarget.target);
+  }
+
+  async function pickFolderAndScan() {
+    if (scanLoading) return;
+    try {
+      const picked = await openDialog({ directory: true, multiple: false, title: "选择要分析的文件夹" });
+      if (!picked || Array.isArray(picked)) return;
+      scanDrive = "";
+      analysisTarget = { kind: "dir", target: picked };
+      await doScan("dir", picked);
+    } catch (e) {
+      pushToast("选择文件夹失败：" + e, "error");
+    }
+  }
+
+  async function doScan(kind, target) {
+    if (scanJob) return; // 已有扫描进行中（例如切换视图后返回）
     scanLoading = true;
     scanResult = null;
     scanError = null;
     cancelRequested = false;
-    resetDrill();
+    scanProgress = null;
+    expanded = new Set([""]);
+    childrenCache = new Map();
+    sortedDirs = null;
+    filesCache = new Map();
+    filesLoading = new Set();
+    const job = { kind, target };
+    job.promise = (kind === "volume"
+      ? invoke("scan_volume", { drive: target, topN: 50 })
+      : invoke("scan_directory", { dirPath: target, topN: 50 })
+    )
+      .then((result) => {
+        scanCache = { kind, target, result, at: Date.now() };
+        return result;
+      })
+      .finally(() => {
+        if (scanJob === job) scanJob = null;
+      });
+    scanJob = job;
     try {
-      scanResult = await invoke("scan_volume", { drive, topN: 50 });
-      if (scanResult.errors > 0) {
-        pushToast(`扫描完成，${scanResult.errors} 个文件/目录无法访问`, "warn");
+      const result = await job.promise;
+      scanResult = result;
+      scanAt = scanCache?.at || Date.now();
+      if (result.errors > 0) {
+        pushToast(`扫描完成，${result.errors} 个文件/目录无法访问`, "warn");
       }
+      loadFiles("");
     } catch (e) {
       scanError = String(e);
       pushToast("扫描失败：" + e, "error");
     } finally {
       scanLoading = false;
+      scanProgress = null;
     }
   }
 
-  // 手动（重新）扫描当前盘：会重置下钻栈，回到整卷视图。
-  function rescan() {
-    if (scanLoading || !scanDrive) return;
-    scanVolume(scanDrive);
-  }
-
-  // 取消正在进行的扫描（整卷或下钻）。后端会在下一个检查点尽快停止，
-  // 返回取消前已收集到的部分结果，不会报错。
   async function cancelScan() {
     if (cancelRequested) return;
     cancelRequested = true;
@@ -105,27 +220,188 @@
     } catch {}
   }
 
-  const srcLabel = (s) => (s === "mft" ? "MFT 极速扫描" : "逐目录扫描");
-
-  // 将扫描结果里的路径拼成绝对路径。
-  // MFT 扫描给出的是相对盘符根的路径（如 "Users\\x\\y"）；walk 回退可能已是绝对路径。
-  function absPath(p) {
-    if (!p) return scanDrive.replace(/\\?$/, "\\");
-    // 已含盘符 (C:\...) 或 UNC (\\server) 视为绝对
-    if (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\")) return p;
-    const root = scanDrive.replace(/[:\\]*$/, ""); // "D:" -> "D"
-    return `${root}:\\${p.replace(/^[\\/]+/, "")}`;
+  // 目录的直接子目录：按路径排序后二分定位前缀，再过滤出直接子目录。
+  // 只排序一次（引用副本），内存开销小；每个父目录的结果单独缓存。
+  function childrenOf(rel) {
+    if (childrenCache.has(rel)) return childrenCache.get(rel);
+    const out = [];
+    if (scanResult) {
+      const seen = new Set();
+      if (rel === "") {
+        // 根的直接子目录：单次遍历即可，避免首次展示前排序全量路径
+        for (const d of scanResult.dirs) {
+          if (d.path.indexOf("\\") === -1 && !seen.has(d.path)) {
+            seen.add(d.path);
+            out.push(d);
+          }
+        }
+      } else {
+        if (!sortedDirs) {
+          sortedDirs = scanResult.dirs.slice().sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+        }
+        const prefix = rel + "\\";
+        let lo = 0;
+        let hi = sortedDirs.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (sortedDirs[mid].path < prefix) lo = mid + 1;
+          else hi = mid;
+        }
+        for (let i = lo; i < sortedDirs.length; i++) {
+          const p = sortedDirs[i].path;
+          if (!p.startsWith(prefix)) break;
+          // 直接子目录：前缀之后不再含分隔符（按路径去重，防异常数据重复渲染）
+          if (p.indexOf("\\", prefix.length) === -1 && !seen.has(p)) {
+            seen.add(p);
+            out.push(sortedDirs[i]);
+          }
+        }
+      }
+      out.sort((a, b) => b.total_size - a.total_size);
+    }
+    childrenCache.set(rel, out);
+    return out;
   }
 
-  function parentDir(p) {
-    const idx = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
-    return idx > 2 ? p.slice(0, idx) : p;
+  function toggleExpand(rel) {
+    const next = new Set(expanded);
+    if (next.has(rel)) next.delete(rel);
+    else {
+      next.add(rel);
+      loadFiles(rel);
+    }
+    expanded = next;
   }
 
-  // 在资源管理器中打开目录（或定位文件所在目录）
-  async function openInExplorer(rawPath, isFile) {
-    const abs = absPath(rawPath);
-    const target = isFile ? parentDir(abs) : abs;
+  async function loadFiles(rel) {
+    if (filesCache.has(rel) || filesLoading.has(rel)) return;
+    filesLoading = new Set(filesLoading).add(rel);
+    try {
+      const files = await invoke("list_dir_files", { dirPath: absDir(rel), limit: 200 });
+      filesCache = new Map(filesCache).set(rel, files);
+    } catch {
+      filesCache = new Map(filesCache).set(rel, []);
+    } finally {
+      const s = new Set(filesLoading);
+      s.delete(rel);
+      filesLoading = s;
+    }
+  }
+
+  function basePath() {
+    if (!analysisTarget) return "";
+    if (analysisTarget.kind === "volume") {
+      return analysisTarget.target.replace(/[:\\]*$/, "") + ":\\";
+    }
+    return analysisTarget.target.replace(/[\\/]+$/, "") + "\\";
+  }
+
+  function absDir(rel) {
+    const base = basePath();
+    if (!rel) return base;
+    return base + rel;
+  }
+
+  function targetLabel() {
+    if (!analysisTarget) return "";
+    return analysisTarget.kind === "volume" ? `${analysisTarget.target} 整卷` : analysisTarget.target;
+  }
+
+  // 构造可见行（展开状态 + 按需文件）
+  $: visibleRows = analysisTarget ? buildRows(scanResult, expanded, filesCache, filesLoading, targetLabel()) : [];
+
+  function buildRows(result, expandedSet, fileCache, loadingSet, rootLabel) {
+    if (!result) return [];
+    const rows = [];
+    const rootSize = result.root_size || 0;
+    rows.push({
+      key: "root",
+      kind: "dir",
+      depth: 0,
+      rel: "",
+      name: rootLabel,
+      size: rootSize,
+      fileCount: result.scanned,
+      pct: null,
+      modified: 0,
+    });
+    const pushLevel = (rel, parentSize, depth) => {
+      for (const d of childrenOf(rel)) {
+        const pct = parentSize > 0 ? (d.total_size / parentSize) * 100 : null;
+        rows.push({
+          key: "d|" + d.path,
+          kind: "dir",
+          depth,
+          rel: d.path,
+          name: d.path.split("\\").filter(Boolean).pop() || d.path,
+          size: d.total_size,
+          fileCount: d.file_count,
+          pct,
+          modified: d.modified_secs,
+        });
+        if (expandedSet.has(d.path)) {
+          pushLevel(d.path, d.total_size, depth + 1);
+          pushFiles(d.path, d.total_size, depth + 1);
+        }
+      }
+    };
+    const pushFiles = (rel, parentSize, depth) => {
+      const files = fileCache.get(rel);
+      if (!files) {
+        if (loadingSet.has(rel)) {
+          rows.push({ key: "loading|" + rel, kind: "loading", depth, name: "正在读取文件…" });
+        }
+        return;
+      }
+      const seenFiles = new Set();
+      for (const f of files) {
+        if (seenFiles.has(f.path)) continue;
+        seenFiles.add(f.path);
+        rows.push({
+          key: "f|" + f.path,
+          kind: "file",
+          depth,
+          rel,
+          name: f.name,
+          size: f.size,
+          fileCount: null,
+          pct: parentSize > 0 ? (f.size / parentSize) * 100 : null,
+          modified: f.modified_secs,
+          absPath: f.path,
+        });
+      }
+    };
+    if (expandedSet.has("")) {
+      pushLevel("", rootSize, 1);
+      pushFiles("", rootSize, 1);
+    }
+    return rows;
+  }
+
+  function openTreeRow(row) {
+    if (row.kind === "loading") return;
+    if (row.kind === "file") {
+      openInExplorer(parentOfAbs(row.absPath));
+      return;
+    }
+    toggleExpand(row.rel);
+  }
+
+  function openTreeFolder(row) {
+    if (row.kind !== "dir") return;
+    openInExplorer(absDir(row.rel));
+  }
+
+  // ===== 通用 =====
+  function parentOfAbs(p) {
+    const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+    if (i < 0) return p;
+    // "C:\file" → "C:\"（盘根），避免返回 "C:" 这种驱动器相对路径
+    if (i === 2 && /^[a-zA-Z]:[\\/]/.test(p)) return p.slice(0, 3);
+    return i > 2 ? p.slice(0, i) : p;
+  }
+
+  async function openInExplorer(target) {
     try {
       await shellOpen(target);
     } catch (e) {
@@ -133,43 +409,16 @@
     }
   }
 
-  // ——— 目录下钻 ———
-  let drillStack = []; // [{ path, result }]
-  let drillLoading = false;
-
-  async function drillInto(rawPath) {
-    const abs = absPath(rawPath);
-    drillLoading = true;
-    cancelRequested = false;
-    try {
-      const res = await invoke("scan_directory", { dirPath: abs, topN: 50 });
-      drillStack = [...drillStack, { path: abs, result: res }];
-    } catch (e) {
-      pushToast("下钻扫描失败：" + e, "error");
-    } finally {
-      drillLoading = false;
-    }
+  // 大文件路径：MFT 返回相对路径，walk 返回绝对路径
+  function absPathFor(raw) {
+    if (!raw) return basePath();
+    if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith("\\\\")) return raw;
+    return absDir(raw);
   }
 
-  function drillBack(toIndex) {
-    // toIndex = -1 表示回到整卷视图
-    drillStack = drillStack.slice(0, toIndex + 1);
+  function openLargeFile(raw) {
+    openInExplorer(parentOfAbs(absPathFor(raw)));
   }
-
-  // 当前展示的结果：优先下钻栈顶，否则整卷扫描
-  $: activeResult = drillStack.length > 0 ? drillStack[drillStack.length - 1].result : scanResult;
-  $: activeRoot = drillStack.length > 0 ? drillStack[drillStack.length - 1].path : scanDrive;
-
-  // 切换盘符时清空下钻栈
-  function resetDrill() {
-    drillStack = [];
-  }
-
-  const fmtTime = (secs) => {
-    if (!secs) return "-";
-    const d = new Date(secs * 1000);
-    return d.toLocaleDateString("zh-CN") + " " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-  };
 
   const fmtSize = (n) => {
     if (!n) return "0 B";
@@ -179,15 +428,55 @@
     return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
   };
 
-  const fmtCount = (n) => {
-    if (!n) return "0";
-    if (n < 1000) return String(n);
-    if (n < 1000000) return (n / 1000).toFixed(1) + "K";
-    return (n / 1000000).toFixed(1) + "M";
+  // 文件数量：用千分位整数，避免 K/M 与容量单位混淆
+  const fmtNum = (n) => (n || 0).toLocaleString("zh-CN");
+
+  const fmtTime = (secs) => {
+    if (!secs) return "—";
+    const d = new Date(secs * 1000);
+    return d.toLocaleDateString("zh-CN") + " " + d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
   };
 
-  // Max bar width calculation
-  $: maxDirSize = activeResult?.dirs?.[0]?.total_size ?? 1;
+  const srcLabel = (s) => (s === "mft" ? "MFT 极速扫描" : "逐目录扫描");
+
+  const fmtAgo = (ts) => {
+    if (!ts) return "";
+    const mins = Math.floor((Date.now() - ts) / 60000);
+    if (mins < 1) return "刚刚";
+    if (mins < 60) return `${mins} 分钟前`;
+    return `${Math.floor(mins / 60)} 小时前`;
+  };
+
+  // ===== 物理盘寿命辅助 =====
+  const fmtHours = (h) => {
+    if (h == null || h <= 0) return "—";
+    const years = h / 8766;
+    if (years >= 1) return `${years.toFixed(1)} 年（${h} 小时）`;
+    return `${Math.floor(h / 24)} 天（${h} 小时）`;
+  };
+  const fmtUnits = (units) => {
+    if (!units) return "—";
+    const bytes = units * 512000; // NVMe 数据单元 = 1000 × 512 B
+    if (bytes >= 1e12) return (bytes / 1e12).toFixed(2) + " TB";
+    return (bytes / 1e9).toFixed(1) + " GB";
+  };
+  // 累计写入字节 ÷ 盘容量 = 全盘写入次数（直观的磨损参考）
+  const fullDiskWrites = (nvme, size) => {
+    if (!nvme || !size) return null;
+    return ((nvme.data_units_written * 512000) / size).toFixed(1);
+  };
+  const wearClass = (w) => (w >= 80 ? "danger" : w >= 50 ? "warn" : "ok");
+  const nvmeWarnText = (cw) => {
+    if (!cw) return "无";
+    const items = [];
+    if (cw & 1) items.push("备用空间低于阈值");
+    if (cw & 2) items.push("温度超限");
+    if (cw & 4) items.push("可靠性降低");
+    if (cw & 8) items.push("已进入只读");
+    if (cw & 16) items.push("易失缓存备份失败");
+    if (cw & 32) items.push("持久存储只读");
+    return items.length ? items.join("、") : `0x${cw.toString(16)}`;
+  };
 </script>
 
 <div class="tabs" role="tablist">
@@ -196,7 +485,6 @@
 </div>
 
 {#if tab === "overview"}
-  <!-- ===== Existing disk overview ===== -->
   <div class="head">
     <h2 class="section-title">分区使用率</h2>
     <button class="ghost" on:click={refresh}>刷新</button>
@@ -207,7 +495,14 @@
   {:else}
     <div class="vol-grid">
       {#each volumes as v}
-        <article class="card">
+        <div
+          class="card vol-card"
+          role="button"
+          tabindex="0"
+          title="点击进入该分区的空间分析"
+          on:click={() => openAnalyzerForDrive(v.drive)}
+          on:keydown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), openAnalyzerForDrive(v.drive))}
+        >
           <div class="card-head">
             <span class="vol-name">
               <strong>{v.drive}</strong>
@@ -222,7 +517,8 @@
             <span>{v.fs} · {v.drive_type}</span>
             <span>可用 {fmt(v.free)} / 共 {fmt(v.total)}</span>
           </div>
-        </article>
+          <span class="vol-action">空间分析 ›</span>
+        </div>
       {/each}
     </div>
 
@@ -237,41 +533,138 @@
     {:else}
       <div class="disk-list">
         {#each disks as d}
-          <article class="card disk-row">
+          <div
+            class="card disk-row"
+            class:open={expandedDisk === d.index}
+            role="button"
+            tabindex="0"
+            title="点击查看详情"
+            on:click={() => (expandedDisk = expandedDisk === d.index ? -1 : d.index)}
+            on:keydown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                expandedDisk = expandedDisk === d.index ? -1 : d.index;
+              }
+            }}
+          >
             <div class="disk-main">
+              <span class="chev">{expandedDisk === d.index ? "▾" : "▸"}</span>
               <span class="health {d.healthy ? 'ok' : 'bad'}" title={d.status}></span>
               <div>
                 <div class="disk-model">{d.model || "未知型号"}</div>
                 <div class="disk-sub">
-                  {d.media || "—"} · {d.interface || "—"}{d.serial ? ` · SN ${d.serial}` : ""}
+                  {d.media || "—"} · {d.interface || "—"}{d.firmware ? ` · FW ${d.firmware}` : ""}{d.serial ? ` · SN ${d.serial}` : ""}{#if d.volumes?.length} · 分区 {d.volumes.join(" ")}{/if}
                 </div>
               </div>
             </div>
             <div class="disk-right">
+              {#if d.wear != null}
+                <span class="wear-badge {wearClass(d.wear)}">磨损 {d.wear}%</span>
+              {/if}
               {#if d.temperature != null}
                 <span class="temp">{d.temperature}°C</span>
               {/if}
               <span class="disk-size">{d.size > 0 ? fmt(d.size) : "—"}</span>
               <span class="status-badge {d.healthy ? 'ok' : 'bad'}">{d.status}</span>
             </div>
-          </article>
+          </div>
+          {#if expandedDisk === d.index}
+            <div class="disk-detail">
+              <div class="dd-section">
+                <h4 class="dd-title">基本信息</h4>
+                <div class="kv-grid">
+                  <span class="kv"><i>型号</i><b>{d.model || "—"}</b></span>
+                  <span class="kv"><i>固件</i><b>{d.firmware || "—"}</b></span>
+                  <span class="kv"><i>序列号</i><b>{d.serial || "—"}</b></span>
+                  <span class="kv"><i>接口 / 介质</i><b>{d.interface || "—"} / {d.media || "—"}</b></span>
+                  <span class="kv"><i>容量</i><b>{d.size > 0 ? fmt(d.size) : "—"}</b></span>
+                  <span class="kv"><i>承载分区</i><b>{d.volumes?.length ? d.volumes.join(" ") : "—"}</b></span>
+                </div>
+              </div>
+
+              <div class="dd-section">
+                <h4 class="dd-title">健康与寿命</h4>
+                <div class="kv-grid">
+                  <span class="kv"><i>SMART 状态</i><b class={d.healthy ? "ok-text" : "bad-text"}>{d.status}</b></span>
+                  <span class="kv"><i>通电时长</i><b>{fmtHours(d.power_on_hours)}</b></span>
+                  <span class="kv"><i>当前温度</i><b>{d.temperature != null ? d.temperature + "°C" : "—"}</b></span>
+                  <span class="kv"><i>历史最高温度</i><b>{d.temperature_max != null ? d.temperature_max + "°C" : "—"}</b></span>
+                  <span class="kv"><i>通电次数</i><b>{d.power_cycles ?? "—"}</b></span>
+                  <span class="kv"><i>磁头加载/卸载</i><b>{d.load_unload_cycles ?? "—"}</b></span>
+                  <span class="kv"><i>制造日期</i><b>{d.manufacture_date || "—"}</b></span>
+                  <span class="kv"><i>累计读写错误</i><b>{d.read_errors != null || d.write_errors != null ? `读 ${d.read_errors ?? 0} / 写 ${d.write_errors ?? 0}` : "—"}</b></span>
+                </div>
+                {#if d.wear != null}
+                  <div class="wear-row">
+                    <span class="wear-label">磨损程度</span>
+                    <div class="wear-track"><div class="wear-fill {wearClass(d.wear)}" style="width:{Math.min(100, d.wear)}%"></div></div>
+                    <span class="mono {wearClass(d.wear)}-text">{d.wear}%</span>
+                  </div>
+                {:else}
+                  <p class="dd-note">该盘未提供磨损百分比（多数机械盘无此指标）。</p>
+                {/if}
+                <p class="dd-note">已用寿命由硬盘自行上报（整数百分比，0% 表示低于 1%）；「全盘写入次数」= 累计写入量 ÷ 容量，可直观参考磨损程度。</p>
+              </div>
+
+              {#if d.nvme}
+                <div class="dd-section">
+                  <h4 class="dd-title">NVMe 健康日志</h4>
+                  <div class="kv-grid">
+                    <span class="kv"><i>健康警告</i><b>{nvmeWarnText(d.nvme.critical_warning)}</b></span>
+                    <span class="kv"><i>已用寿命</i><b>{d.nvme.percentage_used}%</b></span>
+                    <span class="kv"><i>可用备用空间</i><b>{d.nvme.available_spare}%（阈值 {d.nvme.available_spare_threshold}%）</b></span>
+                    <span class="kv"><i>累计读取</i><b>{fmtUnits(d.nvme.data_units_read)}</b></span>
+                    <span class="kv"><i>累计写入</i><b>{fmtUnits(d.nvme.data_units_written)}</b></span>
+                    {#if fullDiskWrites(d.nvme, d.size)}
+                      <span class="kv"><i>≈ 全盘写入</i><b>{fullDiskWrites(d.nvme, d.size)} 次</b></span>
+                    {/if}
+                    <span class="kv"><i>异常掉电</i><b>{d.nvme.unsafe_shutdowns} 次</b></span>
+                    <span class="kv"><i>介质错误</i><b>{d.nvme.media_errors} 次</b></span>
+                  </div>
+                </div>
+              {/if}
+
+              {#if d.smart_attributes?.length}
+                <details class="dd-section">
+                  <summary class="dd-title clickable">SMART 属性明细（{d.smart_attributes.length} 项）</summary>
+                  <div class="attr-wrap">
+                    <table class="attr-table">
+                      <thead><tr><th>ID</th><th>属性</th><th class="num">当前</th><th class="num">最差</th><th class="num">原始值</th></tr></thead>
+                      <tbody>
+                        {#each d.smart_attributes as a}
+                          <tr>
+                            <td class="mono">{a.id}</td>
+                            <td>{a.name}</td>
+                            <td class="num mono">{a.value}</td>
+                            <td class="num mono">{a.worst}</td>
+                            <td class="num mono">{a.raw}</td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              {/if}
+
+              <p class="dd-note">数据来源：{d.data_source}。</p>
+            </div>
+          {/if}
         {/each}
       </div>
       <p class="muted small">
-        健康状态来自 Win32_DiskDrive（SMART 预测：OK / Degraded / Pred Fail）。
-        温度来自 MSFT_StorageReliabilityCounter，需管理员权限且多为 NVMe 支持——未显示温度即表示未提权或该盘不支持。
+        健康状态来自 Win32_DiskDrive（SMART 预测：OK / Degraded / Pred Fail）。寿命与温度来自 NVMe 健康日志 / SATA SMART / MSFT_StorageReliabilityCounter，需管理员权限——未显示即表示未提权或该盘不支持。点击磁盘行可查看详情。
       </p>
     {/if}
   {/if}
 {:else}
-  <!-- ===== Space Analyzer tab ===== -->
+  <!-- ===== 空间分析 ===== -->
   <section class="analyzer">
     <div class="drive-picker">
       {#each volumes as v}
         <button
           class="drive-chip"
-          class:active={scanDrive === v.drive}
-          on:click={() => scanVolume(v.drive)}
+          class:active={analysisTarget?.kind === "volume" && scanDrive === v.drive}
+          on:click={() => selectDrive(v.drive)}
           disabled={scanLoading}
         >
           <span class="dc-drive mono">{v.drive}</span>
@@ -280,22 +673,41 @@
       {/each}
     </div>
 
+    <div class="analyzer-actions">
+      <button class="primary" on:click={startScan} disabled={scanLoading || !analysisTarget}>
+        {scanLoading ? "扫描中…" : scanResult ? "重新扫描" : "开始扫描"}
+      </button>
+      <button class="ghost" on:click={pickFolderAndScan} disabled={scanLoading}>扫描文件夹…</button>
+      {#if !$elevated}
+        <span class="elev-hint">
+          MFT 极速扫描需管理员权限，当前将使用逐目录扫描（较慢）。
+          <button class="link" on:click={relaunchAdmin}>以管理员重启</button>
+        </span>
+      {/if}
+    </div>
+
     {#if scanLoading}
-      <div class="scan-loading">
-        <div class="spinner"></div>
-        <p class="scan-status">
-          {cancelRequested ? "正在停止扫描…" : `正在扫描 ${scanDrive} 整盘，首次读取 MFT 需管理员权限…`}
-        </p>
-        <div class="scan-loading-actions">
-          <button class="ghost" on:click={cancelScan} disabled={cancelRequested}>
-            {cancelRequested ? "正在停止…" : "取消扫描"}
-          </button>
+      <div class="scan-card">
+        <div class="scan-line">
+          <span class="scan-target">正在扫描 {analysisTarget?.target}</span>
+          {#if scanProgress?.percent != null}
+            <span class="mono">{scanProgress.percent.toFixed(0)}%</span>
+          {/if}
         </div>
-        <div class="skeleton-list">
-          {#each Array(6) as _}
-            <div class="skeleton-row"></div>
-          {/each}
+        <div class="progress" class:indeterminate={scanProgress?.percent == null}>
+          <div class="progress-fill" style={scanProgress?.percent != null ? `width:${scanProgress.percent}%` : ""}></div>
         </div>
+        <div class="scan-sub muted">
+          {#if scanProgress}
+            已处理 <b class="mono">{fmtNum(scanProgress.scanned)}</b>{#if scanProgress.total} / <span class="mono">{fmtNum(scanProgress.total)}</span>{:else} 项{/if}
+            · {srcLabel(scanProgress.source)}
+          {:else}
+            准备中…
+          {/if}
+        </div>
+        <button class="ghost" on:click={cancelScan} disabled={cancelRequested}>
+          {cancelRequested ? "正在停止…" : "取消扫描"}
+        </button>
       </div>
     {/if}
 
@@ -303,79 +715,84 @@
       <div class="note">{scanError}</div>
     {/if}
 
+    {#if !scanResult && !scanLoading && !scanError}
+      <div class="center-cta">
+        <p class="muted">选择上方磁盘（或扫描指定文件夹），然后点击「开始扫描」。扫描结果会保留，切换页面再回来无需重扫。</p>
+      </div>
+    {/if}
+
     {#if scanResult && !scanLoading}
-      {#if activeResult?.cancelled}
+      {#if scanResult.cancelled}
         <div class="note-box warn">扫描已手动取消，以下为取消前已收集到的部分结果。</div>
       {/if}
 
       <div class="scan-summary-row">
         <div class="scan-summary">
-          <div class="sum-item"><span class="sum-val mono">{fmtCount(scanResult.scanned)}</span><span class="sum-label">已扫描文件</span></div>
+          <div class="sum-item"><span class="sum-val mono">{fmtNum(scanResult.scanned)}</span><span class="sum-label">已扫描文件（个）</span></div>
           <div class="sum-item"><span class="sum-val mono">{(scanResult.elapsed_ms / 1000).toFixed(2)}s</span><span class="sum-label">耗时</span></div>
-          <div class="sum-item"><span class="sum-val src-tag" class:mft={scanResult.source === "mft"}>{srcLabel(scanResult.source)}</span><span class="sum-label">扫描方式</span></div>
+          <div class="sum-item"><span class="sum-val src-tag" class:mft={scanResult.source === "mft"}>{srcLabel(scanResult.source)}</span><span class="sum-label">{scanAt ? `扫描于 ${fmtAgo(scanAt)}` : "扫描方式"}</span></div>
           {#if scanResult.errors > 0}
             <div class="sum-item"><span class="sum-val mono danger-text">{scanResult.errors}</span><span class="sum-label">无法访问</span></div>
           {/if}
         </div>
-        <button class="ghost" on:click={rescan}>重新扫描</button>
       </div>
 
-      <!-- 面包屑：整卷 → 下钻路径 -->
-      <div class="breadcrumb">
-        <button class="crumb" class:active={drillStack.length === 0} on:click={() => drillBack(-1)}>
-          {scanDrive} 整卷
-        </button>
-        {#each drillStack as d, i}
-          <span class="crumb-sep">›</span>
-          <button class="crumb" class:active={i === drillStack.length - 1} on:click={() => drillBack(i)} title={d.path}>
-            {d.path.split(/[\\/]/).filter(Boolean).pop() || d.path}
-          </button>
-        {/each}
-        {#if drillLoading}
-          <span class="crumb-loading">
-            {cancelRequested ? "正在停止…" : "下钻中…"}
-            <button class="crumb-cancel" on:click={cancelScan} disabled={cancelRequested}>取消</button>
-          </span>
-        {/if}
-      </div>
-
-      {#if activeResult?.dirs?.length > 0}
-        <section class="dir-section">
-          <h4 class="section-subtitle">目录分布 <span class="hint">（点击目录名下钻）</span></h4>
-          <div class="dir-list">
-            {#each activeResult.dirs.slice(0, 20) as dir (dir.path)}
-              <div class="dir-row">
-                <button class="dir-path mono" title="{dir.path}（点击下钻）" on:click={() => drillInto(dir.path)}>
-                  <span class="dir-ico">📁</span>{dir.path || "(根目录)"}
-                </button>
-                <span class="dir-size mono">{fmtSize(dir.total_size)}</span>
-                <span class="dir-count mono">{fmtCount(dir.file_count)} 文件</span>
-                <div class="dir-bar-track">
-                  <div class="dir-bar-fill" style="width:{(dir.total_size / maxDirSize * 100).toFixed(1)}%"></div>
-                </div>
-                <button class="row-act" title="在资源管理器中打开" on:click={() => openInExplorer(dir.path, false)}>打开</button>
+      <div class="tree-wrap">
+        <div class="tree-head">
+          <span class="th-name">名称</span>
+          <span class="th-num">大小</span>
+          <span class="th-num">文件数</span>
+          <span class="th-num">占父级</span>
+          <span class="th-time">修改时间</span>
+          <span class="th-act"></span>
+        </div>
+        <div class="tree-body">
+          {#each visibleRows as row (row.key)}
+            {#if row.kind === "loading"}
+              <div class="tree-row loading" style="--depth:{row.depth}">
+                <span class="tr-name"><span class="tr-icon">…</span>{row.name}</span>
               </div>
-            {/each}
-          </div>
-        </section>
-      {/if}
+            {:else}
+              <div class="tree-row" class:file={row.kind === "file"} style="--depth:{row.depth}">
+                <span class="tr-name">
+                  {#if row.kind === "dir"}
+                    <button class="twisty" class:open={expanded.has(row.rel)} on:click={() => toggleExpand(row.rel)} aria-label={expanded.has(row.rel) ? "收起" : "展开"}>▸</button>
+                    <span class="tr-icon">📁</span>
+                  {:else}
+                    <span class="twisty-spacer"></span>
+                    <span class="tr-icon">📄</span>
+                  {/if}
+                  <button class="tr-label" title={row.kind === "dir" ? absDir(row.rel) : row.absPath} on:click={() => openTreeRow(row)}>{row.name}</button>
+                </span>
+                <span class="tr-num mono">{fmtSize(row.size)}</span>
+                <span class="tr-num mono">{row.kind === "dir" ? fmtNum(row.fileCount) : "—"}</span>
+                <span class="tr-num mono">{row.pct != null ? row.pct.toFixed(1) + "%" : "—"}</span>
+                <span class="tr-time mono">{fmtTime(row.modified)}</span>
+                <span class="tr-act">
+                  <button class="row-act" title={row.kind === "dir" ? "在资源管理器中打开目录" : "在资源管理器中打开所在目录"} on:click={() => (row.kind === "dir" ? openTreeFolder(row) : openInExplorer(parentOfAbs(row.absPath)))}>打开</button>
+                </span>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      </div>
 
-      {#if activeResult?.large_files?.length > 0}
+      {#if scanResult.large_files?.length > 0}
         <section class="files-section">
-          <h4 class="section-subtitle">最大文件 TOP {activeResult.large_files.length}</h4>
+          <h4 class="section-subtitle">最大文件 TOP {scanResult.large_files.length}</h4>
           <div class="table-wrap small-table">
             <table>
               <thead>
                 <tr><th>文件路径</th><th class="num">大小</th><th class="num">修改时间</th><th class="col-fact">操作</th></tr>
               </thead>
               <tbody>
-                {#each activeResult.large_files as f (f.path)}
+                {#each scanResult.large_files as f (f.path)}
                   <tr>
                     <td class="file-path mono" title={f.path}>{f.path}</td>
                     <td class="num mono">{fmtSize(f.size)}</td>
                     <td class="num mono">{fmtTime(f.modified_secs)}</td>
                     <td class="col-fact">
-                      <button class="row-act" title="在资源管理器中定位" on:click={() => openInExplorer(f.path, true)}>定位</button>
+                      <button class="row-act" title="在资源管理器中定位" on:click={() => openLargeFile(f.path)}>定位</button>
                     </td>
                   </tr>
                 {/each}
@@ -420,6 +837,26 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: var(--sp-4);
+  }
+  .vol-card {
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .vol-card:hover, .vol-card:focus-visible {
+    border-color: var(--accent);
+    background: var(--surface-2);
+    outline: none;
+  }
+  .vol-action {
+    display: block;
+    margin-top: 6px;
+    text-align: right;
+    font-size: 11px;
+    color: var(--text-muted);
+    transition: color 0.15s ease;
+  }
+  .vol-card:hover .vol-action, .vol-card:focus-visible .vol-action {
+    color: var(--accent);
   }
   .card-head {
     display: flex;
@@ -488,6 +925,22 @@
     justify-content: space-between;
     align-items: center;
     padding: var(--sp-3) var(--sp-4);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .disk-row:hover, .disk-row:focus-visible {
+    border-color: var(--accent);
+    background: var(--surface-2);
+    outline: none;
+  }
+  .disk-row.open {
+    border-color: var(--accent);
+  }
+  .chev {
+    width: 14px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 11px;
   }
   .disk-main {
     display: flex;
@@ -549,6 +1002,147 @@
     color: var(--danger);
     background: rgba(239, 68, 68, 0.12);
   }
+  .wear-badge {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-family: var(--font-mono);
+  }
+  .wear-badge.ok {
+    color: var(--ok);
+    background: rgba(34, 197, 94, 0.12);
+  }
+  .wear-badge.warn {
+    color: var(--warn);
+    background: rgba(245, 158, 11, 0.14);
+  }
+  .wear-badge.danger {
+    color: var(--danger);
+    background: rgba(239, 68, 68, 0.14);
+  }
+  .ok-text {
+    color: var(--ok);
+  }
+  .bad-text {
+    color: var(--danger);
+  }
+  .warn-text {
+    color: var(--warn);
+  }
+  .danger-text {
+    color: var(--danger);
+  }
+
+  /* 物理盘详情 */
+  .disk-detail {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: var(--sp-4);
+    margin-top: -4px;
+  }
+  .dd-section + .dd-section {
+    margin-top: var(--sp-4);
+    padding-top: var(--sp-4);
+    border-top: 1px solid var(--border);
+  }
+  .dd-title {
+    margin: 0 0 var(--sp-3);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .dd-title.clickable {
+    cursor: pointer;
+  }
+  .kv-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 8px var(--sp-4);
+  }
+  .kv {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    min-width: 0;
+  }
+  .kv i {
+    font-style: normal;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    min-width: 84px;
+  }
+  .kv b {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .wear-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    margin-top: var(--sp-3);
+    font-size: 12px;
+  }
+  .wear-label {
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .wear-track {
+    flex: 1;
+    max-width: 320px;
+    height: 8px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .wear-fill {
+    height: 100%;
+    border-radius: 999px;
+  }
+  .wear-fill.ok {
+    background: var(--ok);
+  }
+  .wear-fill.warn {
+    background: var(--warn);
+  }
+  .wear-fill.danger {
+    background: var(--danger);
+  }
+  .dd-note {
+    margin: var(--sp-3) 0 0;
+    font-size: 11px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+  .attr-wrap {
+    margin-top: var(--sp-3);
+    max-height: 280px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .attr-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .attr-table th, .attr-table td {
+    padding: 4px 10px;
+    text-align: left;
+    border-top: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .attr-table th {
+    position: sticky;
+    top: 0;
+    background: var(--surface-2);
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .attr-table td.num, .attr-table th.num {
+    text-align: right;
+  }
   .note-box {
     font-size: 12px;
     line-height: 1.6;
@@ -572,6 +1166,31 @@
   }
   .ghost:hover {
     background: var(--surface-2);
+  }
+  .primary {
+    border: none;
+    background: linear-gradient(135deg, var(--accent), #7c3aed);
+    color: #fff;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 8px 18px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .primary:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .link {
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 0 2px;
+    text-decoration: underline;
   }
 
   /* ===== Tabs ===== */
@@ -602,7 +1221,7 @@
     border-bottom-color: var(--accent);
   }
 
-  /* ===== Space Analyzer styles ===== */
+  /* ===== 空间分析 ===== */
   .mono {
     font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
@@ -611,7 +1230,7 @@
     display: flex;
     gap: var(--sp-3);
     flex-wrap: wrap;
-    margin-bottom: var(--sp-4);
+    margin-bottom: var(--sp-3);
   }
   .drive-chip {
     display: flex;
@@ -647,16 +1266,68 @@
     font-size: 11px;
     color: var(--text-muted);
   }
-  .scan-status {
-    color: var(--text-muted);
-    font-size: 14px;
-    padding: var(--sp-6) var(--sp-6) 0;
-    text-align: center;
-  }
-  .scan-loading-actions {
+  .analyzer-actions {
     display: flex;
-    justify-content: center;
-    padding-bottom: var(--sp-4);
+    align-items: center;
+    gap: var(--sp-3);
+    flex-wrap: wrap;
+    margin-bottom: var(--sp-4);
+  }
+  .elev-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .scan-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: var(--sp-4);
+    margin-bottom: var(--sp-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-3);
+  }
+  .scan-line {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+  }
+  .scan-target {
+    color: var(--text);
+  }
+  .progress {
+    height: 10px;
+    border-radius: 999px;
+    background: var(--surface-2);
+    overflow: hidden;
+    position: relative;
+  }
+  .progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--ok));
+    transition: width 0.2s ease;
+  }
+  .progress.indeterminate .progress-fill {
+    width: 30%;
+    animation: slide 1.2s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { margin-left: 0; }
+    50% { margin-left: 70%; }
+    100% { margin-left: 0; }
+  }
+  .scan-sub {
+    font-size: 12px;
+  }
+  .scan-card .ghost {
+    align-self: flex-start;
+  }
+
+  .center-cta {
+    padding: var(--sp-8);
+    text-align: center;
   }
   .note {
     padding: var(--sp-3);
@@ -667,13 +1338,12 @@
     font-size: 13px;
     color: #fcd34d;
   }
-
   .scan-summary-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--sp-4);
-    margin-bottom: var(--sp-6);
+    margin-bottom: var(--sp-4);
   }
   .scan-summary {
     display: flex;
@@ -685,17 +1355,18 @@
     gap: 2px;
   }
   .sum-val {
-    font-size: 28px;
+    font-size: 24px;
     font-weight: 700;
   }
   .src-tag {
-    font-size: 15px;
+    font-size: 14px;
     font-weight: 600;
     color: var(--text-muted);
     align-self: flex-start;
     padding: 4px 10px;
     border-radius: var(--radius-sm);
     background: var(--surface-2);
+    margin-top: 2px;
   }
   .src-tag.mft {
     color: var(--ok);
@@ -709,183 +1380,127 @@
     color: var(--danger);
   }
 
-  .section-subtitle {
-    font-size: 14px;
-    font-weight: 600;
-    margin: 0 0 var(--sp-3);
-  }
-  .dir-section {
+  .tree-wrap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--surface);
     margin-bottom: var(--sp-6);
   }
-  .dir-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .dir-row {
+  .tree-head, .tree-row {
     display: grid;
-    grid-template-columns: 1fr 100px 80px 180px 56px;
+    grid-template-columns: minmax(0, 1fr) 96px 72px 68px 130px 56px;
     align-items: center;
-    gap: var(--sp-3);
-    padding: 4px 0;
+    gap: var(--sp-2);
+  }
+  .tree-head {
+    background: var(--surface-2);
+    padding: 8px 14px;
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .tree-body {
+    max-height: calc(100vh - 430px);
+    min-height: 120px;
+    overflow: auto;
+  }
+  .tree-row {
+    padding: 3px 14px;
+    border-top: 1px solid var(--border);
     font-size: 13px;
   }
-  .dir-path {
+  .tree-row:hover {
+    background: var(--surface-2);
+  }
+  .tree-row.file {
+    color: var(--text-muted);
+  }
+  .tree-row.loading {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+  .tr-name {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
+    min-width: 0;
+    padding-left: calc(var(--depth, 0) * 16px);
+  }
+  .twisty {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 10px;
+    cursor: pointer;
+    transition: transform 0.12s ease;
+    padding: 0;
+  }
+  .twisty.open {
+    transform: rotate(90deg);
+  }
+  .twisty-spacer {
+    width: 16px;
+    flex-shrink: 0;
+  }
+  .tr-icon {
+    flex-shrink: 0;
+    font-size: 12px;
+  }
+  .tr-label {
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-family: inherit;
+    font-size: 13px;
+    text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    font-family: var(--font-mono);
-    font-variant-numeric: tabular-nums;
-    font-size: 13px;
-    text-align: left;
-    padding: 4px 6px;
-    border-radius: 6px;
     cursor: pointer;
     min-width: 0;
+    padding: 2px 4px;
+    border-radius: 4px;
   }
-  .dir-path:hover {
-    background: var(--surface-2);
+  .tr-label:hover {
     color: var(--accent);
+    background: var(--surface);
   }
-  .dir-ico {
-    flex-shrink: 0;
-    font-size: 12px;
+  .th-num, .tr-num {
+    text-align: right;
+  }
+  .th-time, .tr-time {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .tr-act {
+    text-align: right;
   }
   .row-act {
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-muted);
     font-family: inherit;
-    font-size: 12px;
-    padding: 3px 10px;
+    font-size: 11px;
+    padding: 2px 8px;
     border-radius: 6px;
     cursor: pointer;
   }
   .row-act:hover {
-    background: var(--surface-2);
+    background: var(--surface);
     color: var(--accent);
     border-color: var(--accent);
   }
-  .col-fact {
-    width: 64px;
-    text-align: right;
-  }
-  .hint {
-    font-size: 11px;
-    font-weight: 400;
-    color: var(--text-muted);
-  }
 
-  /* 面包屑 */
-  .breadcrumb {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-bottom: var(--sp-4);
-    font-size: 13px;
-  }
-  .crumb {
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-family: var(--font-mono);
-    font-size: 12px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .crumb:hover {
-    background: var(--surface-2);
-    color: var(--text);
-  }
-  .crumb.active {
-    color: var(--accent);
+  .section-subtitle {
+    font-size: 14px;
     font-weight: 600;
+    margin: 0 0 var(--sp-3);
   }
-  .crumb-sep {
-    color: var(--text-muted);
-  }
-  .crumb-loading {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-left: var(--sp-2);
-  }
-  .crumb-cancel {
-    border: none;
-    background: transparent;
-    color: var(--danger);
-    font-family: inherit;
-    font-size: 11px;
-    padding: 2px 8px;
-    margin-left: 4px;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  .crumb-cancel:hover {
-    background: rgba(239, 68, 68, 0.12);
-  }
-  .crumb-cancel:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  /* 加载骨架 */
-  .scan-loading {
-    padding: var(--sp-4) 0;
-  }
-  .spinner {
-    width: 28px;
-    height: 28px;
-    margin: 0 auto var(--sp-3);
-    border: 3px solid var(--surface-2);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
-  .skeleton-list {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-top: var(--sp-6);
-  }
-  .skeleton-row {
-    height: 16px;
-    border-radius: 6px;
-    background: linear-gradient(90deg, var(--surface-2) 25%, var(--border) 50%, var(--surface-2) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.3s ease-in-out infinite;
-  }
-  @keyframes shimmer {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
-  }
-  .dir-size {
-    text-align: right;
-  }
-  .dir-count {
-    text-align: right;
-    color: var(--text-muted);
-  }
-  .dir-bar-track {
-    height: 8px;
-    background: var(--surface-2);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-  .dir-bar-fill {
-    height: 100%;
-    border-radius: 999px;
-    background: var(--accent);
+  .files-section {
+    margin-bottom: var(--sp-6);
   }
 
   .small-table tbody {

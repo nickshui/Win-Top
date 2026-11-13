@@ -123,7 +123,18 @@ impl Ord for HeapFile {
 /// `top_n`: 返回最大的 N 个文件。
 ///
 /// 仅支持 NTFS 卷，需要管理员权限。
+/// 无进度回调版本的整卷扫描（保留给测试/内部调用）。
+#[allow(dead_code)]
 pub fn scan_volume(drive: &str, top_n: usize) -> Result<disk_usage::UsageReport, String> {
+    scan_volume_with_progress(drive, top_n, &mut |_, _| {})
+}
+
+/// 带进度的整卷扫描：`progress(已处理记录数, 总记录数)` 周期性回调。
+pub fn scan_volume_with_progress(
+    drive: &str,
+    top_n: usize,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<disk_usage::UsageReport, String> {
     // 检查管理员权限
     if !crate::privilege::is_elevated() {
         return Err("需要管理员权限才能扫描 MFT。请以管理员身份运行。".to_string());
@@ -133,7 +144,7 @@ pub fn scan_volume(drive: &str, top_n: usize) -> Result<disk_usage::UsageReport,
     let vol_path = normalize_path(drive)?;
     let handle = open_volume(&vol_path)?;
 
-    let result = scan_volume_inner(handle, top_n);
+    let result = scan_volume_inner(handle, top_n, progress);
     unsafe { let _ = CloseHandle(handle); }
     result.map(|mut r| {
         r.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -143,7 +154,11 @@ pub fn scan_volume(drive: &str, top_n: usize) -> Result<disk_usage::UsageReport,
 
 // ─── 内部实现 ──────────────────────────────────────────────────────────
 
-fn scan_volume_inner(handle: HANDLE, top_n: usize) -> Result<disk_usage::UsageReport, String> {
+fn scan_volume_inner(
+    handle: HANDLE,
+    top_n: usize,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<disk_usage::UsageReport, String> {
     let (bytes_per_sector, mft_record_size, mft_valid_length) = get_volume_info(handle)?;
 
     if mft_record_size == 0 {
@@ -164,6 +179,9 @@ fn scan_volume_inner(handle: HANDLE, top_n: usize) -> Result<disk_usage::UsageRe
             cancelled = true;
             break;
         }
+        if frn % 2048 == 0 {
+            progress(frn, num_records);
+        }
         match read_one_record(handle, frn, mft_record_size, bytes_per_sector) {
             Ok(Some(mut ents)) => all_entries.append(&mut ents),
             Ok(None) => {}
@@ -172,6 +190,7 @@ fn scan_volume_inner(handle: HANDLE, top_n: usize) -> Result<disk_usage::UsageRe
             }
         }
     }
+    progress(num_records, num_records);
 
     // 注意：取消发生在尚未收集到任何条目时也应正常返回（部分/空结果），
     // 不能落入下面的 Err 分支——否则调用方会把"用户主动取消"误判为
@@ -394,7 +413,7 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
 
     // 从记录中收集：文件大小、各 $FILE_NAME 条目
     let mut file_size: Option<u64> = None;
-    let mut file_names: Vec<(u64, String, u64)> = Vec::new(); // (parent_frn, name, modified_secs)
+    let mut file_names: Vec<(u64, String, u64, u8)> = Vec::new(); // (parent_frn, name, modified_secs, namespace)
 
     let mut pos = attr_off;
     loop {
@@ -435,8 +454,8 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
                         let modified_secs = filetime_to_unix(modified_ft);
                         // 文件名长度（字符数），偏移 64
                         let name_len_chars = record[val_start + 64] as usize;
-                        // 文件名空间，偏移 65
-                        let _namespace = record[val_start + 65];
+                        // 文件名空间，偏移 65（0=POSIX, 1=Win32, 2=DOS 8.3, 3=Win32&DOS）
+                        let namespace = record[val_start + 65];
                         // 文件名起始（UTF-16LE），偏移 66
                         let name_bytes =
                             &record[val_start + 66..val_start + 66 + name_len_chars * 2];
@@ -447,7 +466,7 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
                         let name = String::from_utf16(&name_utf16).unwrap_or_default();
 
                         if !name.is_empty() {
-                            file_names.push((parent_frn, name, modified_secs));
+                            file_names.push((parent_frn, name, modified_secs, namespace));
                         }
                     }
                 }
@@ -474,24 +493,31 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
 
     // 如果没找到 $DATA 属性（空文件或目录），尺寸为 0
     let size = file_size.unwrap_or(0);
-    let name_list = if file_names.is_empty() {
-        // 退回到使用 FRN 做路径
-        vec![(0u64, format!("[FRN-{}]", frn), 0u64)]
-    } else {
-        file_names
-    };
-
-    Ok(name_list
-        .into_iter()
-        .map(|(parent, name, mtime)| MftEntry {
+    // 同一记录可能同时有长名（Win32/POSIX）与 DOS 8.3 短名；优先保留长名。
+    // 聚合层按 FRN 只取一条，返回多条的硬链接语义在此已无意义，直接选一条。
+    let chosen = file_names
+        .iter()
+        .find(|(_, _, _, ns)| *ns != 2)
+        .or_else(|| file_names.first());
+    let entry = match chosen {
+        Some((parent, name, mtime, _)) => MftEntry {
             frn,
-            parent_frn: parent,
-            name,
+            parent_frn: *parent,
+            name: name.clone(),
             size,
             is_dir,
-            modified_secs: mtime,
-        })
-        .collect())
+            modified_secs: *mtime,
+        },
+        None => MftEntry {
+            frn,
+            parent_frn: 0,
+            name: format!("[FRN-{}]", frn),
+            size,
+            is_dir,
+            modified_secs: 0,
+        },
+    };
+    Ok(vec![entry])
 }
 
 // ─── 聚合 ─────────────────────────────────────────────────────────────
@@ -556,6 +582,7 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
     // 5. 自底向上累加
     let mut dir_sizes: HashMap<u64, u64> = HashMap::new();
     let mut dir_file_counts: HashMap<u64, u64> = HashMap::new();
+    let mut dir_modified: HashMap<u64, u64> = HashMap::new();
     let mut scanned = 0u64;
     let mut heap: BinaryHeap<HeapFile> = BinaryHeap::with_capacity(top_n + 1);
 
@@ -566,9 +593,18 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
                 let mut total_sz = 0u64;
                 let mut total_fc = 0u64;
                 if let Some(child_frns) = children.get(&current_frn) {
+                    // 同父下按路径去重：MFT 异常重复记录（孤儿/短名等）会让同一路径出现多次，
+                    // 若重复累计会虚增祖先与根的总大小。
+                    let mut seen_child_paths: std::collections::HashSet<&str> =
+                        std::collections::HashSet::new();
                     for &cf in child_frns {
                         if let Some(child_entry) = entry_map.get(&cf) {
                             if child_entry.is_dir {
+                                if let Some(p) = paths.get(&cf) {
+                                    if !seen_child_paths.insert(p.as_str()) {
+                                        continue;
+                                    }
+                                }
                                 // 子目录：取其已累计的大小
                                 total_sz += dir_sizes.get(&cf).copied().unwrap_or(0);
                                 total_fc += dir_file_counts.get(&cf).copied().unwrap_or(0);
@@ -585,6 +621,7 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
                 }
                 dir_sizes.insert(current_frn, total_sz);
                 dir_file_counts.insert(current_frn, total_fc);
+                dir_modified.insert(current_frn, e.modified_secs);
             } else {
                 // 文件
                 scanned += 1;
@@ -605,6 +642,40 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
     }
 
     // 6. 组装报告
+    if std::env::var_os("WINTOP_MFT_DEBUG").is_some() {
+        if let Some(cf) = children.get(&root_frn) {
+            let (mut dir_count, mut dirs_sum, mut file_count, mut files_sum, mut metas) =
+                (0u64, 0u64, 0u64, 0u64, 0u64);
+            for &c in cf {
+                if let Some(e) = entry_map.get(&c) {
+                    if e.is_dir {
+                        dir_count += 1;
+                        dirs_sum += dir_sizes.get(&c).copied().unwrap_or(0);
+                    } else {
+                        file_count += 1;
+                        files_sum += e.size;
+                        if e.name.starts_with('$') {
+                            metas += e.size;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "[mft-debug] root children: dirs={dir_count} dirs_sum={dirs_sum} files={file_count} files_sum={files_sum} meta_files_sum={metas} root_total={}",
+                dir_sizes.get(&root_frn).copied().unwrap_or(0)
+            );
+            let mut rf: Vec<(u64, &str)> = cf
+                .iter()
+                .filter_map(|c| entry_map.get(c))
+                .filter(|e| !e.is_dir && e.size > 0)
+                .map(|e| (e.size, e.name.as_str()))
+                .collect();
+            rf.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            for (sz, name) in rf.iter().take(12) {
+                eprintln!("[mft-debug] root file: {} {}", sz, name);
+            }
+        }
+    }
     let mut large_files: Vec<disk_usage::LargeFile> = Vec::with_capacity(heap.len());
     while let Some(hf) = heap.pop() {
         large_files.push(disk_usage::LargeFile {
@@ -614,6 +685,12 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
         });
     }
     large_files.reverse(); // 最大在前
+    // 去重：同一路径可能在 MFT 中出现多条记录（孤儿记录 / 短名命名空间等），
+    // 保留体积最大的一条，避免前端 keyed-each 出现重复键导致行错位。
+    {
+        let mut seen = std::collections::HashSet::new();
+        large_files.retain(|f| seen.insert(f.path.clone()));
+    }
 
     let mut dirs: Vec<disk_usage::DirSummary> = Vec::new();
     for (&frn, &total_size) in &dir_sizes {
@@ -626,11 +703,17 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
                     path: path.clone(),
                     total_size,
                     file_count: *dir_file_counts.get(&frn).unwrap_or(&0),
+                    modified_secs: *dir_modified.get(&frn).unwrap_or(&0),
                 });
             }
         }
     }
     dirs.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    // 同一路径只保留体积最大的一条（见上方 large_files 去重说明）
+    {
+        let mut seen = std::collections::HashSet::new();
+        dirs.retain(|d| seen.insert(d.path.clone()));
+    }
 
     disk_usage::UsageReport {
         large_files,
@@ -640,6 +723,7 @@ fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
         source: "mft".into(),
         elapsed_ms: 0,
         cancelled: false,
+        root_size: dir_sizes.get(&root_frn).copied().unwrap_or(0),
     }
 }
 
@@ -949,5 +1033,65 @@ mod tests {
         buf[6..8].copy_from_slice(&2u16.to_le_bytes()); // usa_cnt
         assert!(ensure_fixup(&mut buf, 4096)); // sec_sz > len, no-op
         assert_eq!(&buf[..4], b"FILE");
+    }
+}
+
+#[cfg(test)]
+mod diag_tests {
+    #[test]
+    #[ignore = "真机冒烟：MFT 扫描指定盘并检查重复路径/根大小"]
+    fn mft_diag_dups_and_root() {
+        let drive = std::env::var("WINTOP_MFT_TEST_DRIVE").unwrap_or_else(|_| "D:".into());
+        let r = match super::scan_volume(&drive, 50) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("scan failed: {e}");
+                return;
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut dups: Vec<&String> = Vec::new();
+        for d in &r.dirs {
+            if !seen.insert(&d.path) {
+                dups.push(&d.path);
+            }
+        }
+        let top: Vec<_> = r
+            .dirs
+            .iter()
+            .filter(|d| !d.path.contains('\\'))
+            .collect();
+        let top_sum: u64 = top.iter().map(|d| d.total_size).sum();
+        println!(
+            "source={} scanned={} dirs={} dups={} root_size={} top_sum={} top_count={}",
+            r.source, r.scanned, r.dirs.len(), dups.len(), r.root_size, top_sum, top.len()
+        );
+        for p in dups.iter().take(20) {
+            println!("dup: {p}");
+        }
+        for d in top.iter().take(10) {
+            println!("top: {} size={} files={}", d.path, d.total_size, d.file_count);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_paths_are_merged() {
+        // 两个不同 FRN 但同父同名（孤儿记录等异常场景），应只保留一条且取较大体积
+        let entries = vec![
+            MftEntry { frn: 5, parent_frn: 0, name: String::new(), size: 0, is_dir: true, modified_secs: 0 },
+            MftEntry { frn: 10, parent_frn: 5, name: "dup".into(), size: 0, is_dir: true, modified_secs: 1 },
+            MftEntry { frn: 11, parent_frn: 5, name: "dup".into(), size: 0, is_dir: true, modified_secs: 2 },
+            MftEntry { frn: 20, parent_frn: 10, name: "a.bin".into(), size: 1000, is_dir: false, modified_secs: 0 },
+            MftEntry { frn: 21, parent_frn: 11, name: "b.bin".into(), size: 500, is_dir: false, modified_secs: 0 },
+        ];
+        let report = aggregate(entries, 10);
+        let dups: Vec<_> = report.dirs.iter().filter(|d| d.path == "dup").collect();
+        assert_eq!(dups.len(), 1, "重复路径应被合并");
+        assert_eq!(dups[0].total_size, 1000, "应保留体积最大的一条");
     }
 }
