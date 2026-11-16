@@ -64,6 +64,7 @@ pub struct Artifact {
     pub source: String,     // install-dir | residue-fs | residue-reg | service | startup
     pub reversible: bool,   // 能否回收站/.reg 备份还原
     pub match_reason: String, // 为什么认为它属于该应用（给用户看，尤其低置信）
+    pub auto_select: bool,  // 是否允许默认勾选（仅名称完全匹配且无归属冲突的残留）
 }
 
 #[derive(Serialize, Clone)]
@@ -134,8 +135,18 @@ const GENERIC: &[&str] = &[
     "launcher",
 ];
 
-/// 只保留字母数字并小写（"CC Switch" -> "ccswitch"）。
+/// 只保留有意义的字符并小写（"CC Switch" -> "ccswitch"）。
+/// `+` / `#` 是产品名的区分性组成部分（Codex++、C#），不能当分隔符丢弃，
+/// 否则 "Codex++" 会与 "Codex" 变成同一个身份。
 fn compact(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '+' | '#'))
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// 去掉区分性符号后的基础名（"Codex++" -> "codex"），仅用于说明“名称相近”。
+fn base_compact(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
 }
 
@@ -147,17 +158,23 @@ fn tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// 应用身份：产品紧凑名、产品 token、发行商紧凑名、发行商 token。
+/// 应用身份：产品名、紧凑名、发行商信息。
 struct Identity {
+    prod_name: String,
     prod_compact: String,
+    prod_has_symbol: bool,
     prod_tokens: Vec<String>,
     pub_compact: String,
     pub_tokens: Vec<String>,
 }
 
 fn identity(name: &str, publisher: &str) -> Identity {
+    let prod_compact = compact(name);
+    let prod_base = base_compact(name);
     Identity {
-        prod_compact: compact(name),
+        prod_name: name.to_string(),
+        prod_has_symbol: prod_compact != prod_base,
+        prod_compact,
         prod_tokens: tokens(name),
         pub_compact: compact(publisher),
         pub_tokens: tokens(publisher),
@@ -170,8 +187,18 @@ fn name_match(candidate: &str, id: &Identity) -> Option<(Confidence, String)> {
     if cnorm.is_empty() {
         return None;
     }
+    let cand_toks: HashSet<String> = candidate
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    // 产品名带 +/# 等区分性符号时（Codex++、Notepad++），候选必须包含完整产品名。
+    // 只命中去掉符号后的基础名（Codex）属于另一款产品，不参与产品维度匹配；
+    // 发行商匹配仍保留，供“父目录是否与应用有关”判断使用。
+    let product_allowed = !id.prod_has_symbol || cnorm.contains(&id.prod_compact);
+
     // 与产品紧凑名相等 / 相关 —— 强匹配
-    if !id.prod_compact.is_empty() && id.prod_compact.len() >= 4 {
+    if product_allowed && !id.prod_compact.is_empty() && id.prod_compact.len() >= 4 {
         if cnorm == id.prod_compact {
             return Some((Confidence::High, format!("目录名与完整产品名「{}」一致", candidate)));
         }
@@ -181,20 +208,24 @@ fn name_match(candidate: &str, id: &Identity) -> Option<(Confidence, String)> {
         }
         // 候选名是产品名的前缀：需足够长(≥4)才算中等，避免 "360" 这类短前缀误匹配
         if id.prod_compact.starts_with(&cnorm) && cnorm.len() >= 4 {
-            return Some((Confidence::Medium, format!("目录名「{}」是产品名前缀", candidate)));
+            return Some((
+                Confidence::Medium,
+                format!(
+                    "目录名「{}」是产品名「{}」的前缀，可能是其他产品",
+                    candidate, id.prod_name
+                ),
+            ));
         }
     }
     // 命中某个产品 token —— 中/弱
-    let cand_toks: HashSet<String> = candidate
-        .split(|c: char| !c.is_alphanumeric())
-        .map(|t| t.to_lowercase())
-        .collect();
-    for t in &id.prod_tokens {
-        if cand_toks.contains(t) {
-            return Some((Confidence::Medium, format!("目录名含产品关键词「{}」", t)));
-        }
-        if t.len() >= 6 && cnorm.contains(t.as_str()) {
-            return Some((Confidence::Low, format!("目录名疑似含产品关键词「{}」", t)));
+    if product_allowed {
+        for t in &id.prod_tokens {
+            if cand_toks.contains(t) {
+                return Some((Confidence::Medium, format!("目录名含产品关键词「{}」", t)));
+            }
+            if t.len() >= 6 && cnorm.contains(t.as_str()) {
+                return Some((Confidence::Low, format!("目录名疑似含产品关键词「{}」", t)));
+            }
         }
     }
     // 与发行商相关 —— 弱（发行商名易撞车，仅作低置信提示）
@@ -207,6 +238,17 @@ fn name_match(candidate: &str, id: &Identity) -> Option<(Confidence, String)> {
         }
     }
     None
+}
+
+/// 子目录位于“厂商/共享容器”下时的置信度收敛。
+/// 父目录与应用身份无关时，即使子目录名与产品名完全一致，也只作为复核项
+/// （可能是其他软件的同名产品）；仅前缀/关键词匹配则视为过度猜测，不再展示。
+fn nested_confidence(parent_related: bool, child: Confidence) -> Option<Confidence> {
+    match (parent_related, child) {
+        (true, value) => Some(value),
+        (false, Confidence::High) => Some(Confidence::Medium),
+        (false, _) => None,
+    }
 }
 
 /// 按路径关键词粗分类。保守：拿不准归 Unknown/AppRuntime，绝不轻易标 UserData 之外可删。
@@ -248,6 +290,128 @@ fn is_under(root: &str, child: &str) -> bool {
         return false;
     }
     c == r || c.starts_with(&format!("{}\\", r))
+}
+
+// ─── 跨应用归属检查 ───────────────────────────────────────────────────
+
+#[derive(Debug, PartialEq, Eq)]
+enum OwnershipConflict {
+    /// 位于其他已安装应用的安装目录内：不能再当作本应用的残留展示。
+    OtherAppDir(String),
+    /// 名称与其他已安装应用冲突：降为复核项，必须由用户确认。
+    SameName(String),
+}
+
+/// 从 ARP 条目推导可识别的安装目录（不要求目录存在，用于归属判断）。
+fn install_dirs_of(app: &AppEntry) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let loc = strip_quotes(&app.install_location);
+    if !loc.is_empty() {
+        roots.push(PathBuf::from(loc));
+    }
+    if let Some(dir) = dir_from_icon(&app.display_icon) {
+        roots.push(dir);
+    }
+    if !app.uninstall_string.to_lowercase().contains("msiexec") {
+        if let Some(dir) = first_exe_path(&app.uninstall_string)
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        {
+            roots.push(dir);
+        }
+    }
+    roots
+}
+
+/// 共享容器根（Program Files / AppData / 用户目录等）不能被当作某个应用的
+/// 专属安装目录；部分软件的 ARP 条目会把安装目录误填成这些根。
+fn is_shared_container(path: &str) -> bool {
+    let target = path.trim().trim_end_matches('\\').to_lowercase().replace('/', "\\");
+    if target.is_empty() {
+        return true;
+    }
+    let mut roots = residue_fs_roots();
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        roots.push(PathBuf::from(profile));
+    }
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        roots.push(PathBuf::from(windir));
+    }
+    roots.iter().any(|root| {
+        root.to_string_lossy()
+            .trim_end_matches('\\')
+            .to_lowercase()
+            .replace('/', "\\")
+            == target
+    })
+}
+
+/// 候选路径是否与其他“仍在安装”的应用冲突。
+/// 这是名称匹配之外的第二道归属校验：卸载 Codex++ 时，不能因为名字相近
+/// 就推荐清理另一个仍安装软件的目录。
+fn other_app_conflict(path: &str, apps: &[AppEntry], self_id: &str) -> Option<OwnershipConflict> {
+    let target = path.to_lowercase().replace('/', "\\");
+    let target = target.trim_end_matches('\\');
+    let leaf = Path::new(target)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let leaf_compact = compact(&leaf);
+    let segments: Vec<String> = Path::new(target)
+        .ancestors()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+
+    for other in apps {
+        if other.id == self_id {
+            continue;
+        }
+        for root in install_dirs_of(other) {
+            let root_text = root.to_string_lossy();
+            if is_shared_container(&root_text) {
+                continue;
+            }
+            let root = root_text.to_lowercase().replace('/', "\\");
+            let root = root.trim_end_matches('\\');
+            if root.len() >= 4 && (target == root || target.starts_with(&format!("{}\\", root))) {
+                return Some(OwnershipConflict::OtherAppDir(other.name.clone()));
+            }
+        }
+        let other_id = identity(&other.name, &other.publisher);
+        if other_id.prod_compact.len() >= 4 && leaf_compact == other_id.prod_compact {
+            return Some(OwnershipConflict::SameName(other.name.clone()));
+        }
+        // 路径中的某一段（厂商目录等）与其他已安装应用的产品名/发行商完全一致。
+        if segments.iter().any(|segment| {
+            let value = compact(segment);
+            (!value.is_empty() && value == other_id.prod_compact)
+                || (!other_id.pub_compact.is_empty() && value == other_id.pub_compact)
+        }) {
+            return Some(OwnershipConflict::SameName(other.name.clone()));
+        }
+    }
+    None
+}
+
+/// 应用跨应用归属检查。返回 None 表示应直接排除；返回 Some 为（可能降级后的）置信度与理由。
+fn apply_other_app_guard(
+    path: &str,
+    confidence: Confidence,
+    reason: String,
+    apps: &[AppEntry],
+    self_id: &str,
+) -> Option<(Confidence, String)> {
+    match other_app_conflict(path, apps, self_id) {
+        Some(OwnershipConflict::OtherAppDir(_)) => None,
+        Some(OwnershipConflict::SameName(name)) => Some((
+            if confidence == Confidence::High {
+                Confidence::Medium
+            } else {
+                confidence
+            },
+            format!("{}；与已安装的「{}」存在名称冲突，请确认归属", reason, name),
+        )),
+        None => Some((confidence, reason)),
+    }
 }
 
 // ─── 目录体积 ─────────────────────────────────────────────────────────
@@ -359,6 +523,8 @@ fn add_fs_artifact(
     confidence: Confidence,
     reason: String,
     known_lower: &[String],
+    apps: &[AppEntry],
+    self_id: &str,
     out: &mut Vec<Artifact>,
 ) -> bool {
     let path_str = path.to_string_lossy().to_string();
@@ -373,6 +539,11 @@ fn add_fs_artifact(
     if out.iter().any(|item| item.path.eq_ignore_ascii_case(&path_str)) {
         return false;
     }
+    // 其他仍安装应用的安装目录/同名应用 → 排除或降级复核，绝不默认勾选。
+    let (confidence, reason) = match apply_other_app_guard(&path_str, confidence, reason, apps, self_id) {
+        Some(value) => value,
+        None => return false,
+    };
     out.push(Artifact {
         size: dir_size(path),
         category: classify(&path_str),
@@ -382,11 +553,19 @@ fn add_fs_artifact(
         source: "residue-fs".into(),
         reversible: true,
         match_reason: reason,
+        auto_select: false,
     });
     true
 }
 
-fn scan_fs_root(root: &Path, id: &Identity, known_lower: &[String], out: &mut Vec<Artifact>) {
+fn scan_fs_root(
+    root: &Path,
+    id: &Identity,
+    known_lower: &[String],
+    apps: &[AppEntry],
+    self_id: &str,
+    out: &mut Vec<Artifact>,
+) {
     let rd = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -405,7 +584,7 @@ fn scan_fs_root(root: &Path, id: &Identity, known_lower: &[String], out: &mut Ve
         let direct_match = name_match(&direct_name, id);
         if matches!(direct_match, Some((Confidence::High, _))) {
             if let Some((confidence, reason)) = direct_match {
-                add_fs_artifact(&path, confidence, reason, known_lower, out);
+                add_fs_artifact(&path, confidence, reason, known_lower, apps, self_id, out);
             }
             continue;
         }
@@ -425,35 +604,51 @@ fn scan_fs_root(root: &Path, id: &Identity, known_lower: &[String], out: &mut Ve
                 }
                 let child_name = child.file_name().to_string_lossy().to_string();
                 if let Some((confidence, reason)) = name_match(&child_name, id) {
-                    if confidence != Confidence::Low
-                        && add_fs_artifact(
+                    if let Some(confidence) = nested_confidence(direct_match.is_some(), confidence) {
+                        let parent_note = if direct_match.is_some() {
+                            format!("位于「{}」目录下；", direct_name)
+                        } else {
+                            format!(
+                                "位于「{}」目录下（父目录与应用无隶属关系，可能属于其他软件）；",
+                                direct_name
+                            )
+                        };
+                        if add_fs_artifact(
                             &child_path,
                             confidence,
-                            format!("位于「{}」目录下；{}", direct_name, reason),
+                            format!("{}{}", parent_note, reason),
                             known_lower,
+                            apps,
+                            self_id,
                             out,
-                        )
-                    {
-                        nested_found = true;
+                        ) {
+                            nested_found = true;
+                        }
                     }
                 }
             }
         }
         if !nested_found {
             if let Some((confidence, reason)) = direct_match {
-                add_fs_artifact(&path, confidence, reason, known_lower, out);
+                add_fs_artifact(&path, confidence, reason, known_lower, apps, self_id, out);
             }
         }
     }
 }
 
-fn scan_fs_residue(id: &Identity, known: &[PathBuf], out: &mut Vec<Artifact>) {
+fn scan_fs_residue(
+    id: &Identity,
+    known: &[PathBuf],
+    apps: &[AppEntry],
+    self_id: &str,
+    out: &mut Vec<Artifact>,
+) {
     let known_lower: Vec<String> = known
         .iter()
         .map(|path| path.to_string_lossy().to_lowercase())
         .collect();
     for root in residue_fs_roots() {
-        scan_fs_root(&root, id, &known_lower, out);
+        scan_fs_root(&root, id, &known_lower, apps, self_id, out);
     }
 }
 
@@ -489,7 +684,7 @@ fn registry_candidate_paths(
     matches
 }
 
-fn scan_reg_residue(id: &Identity, out: &mut Vec<Artifact>) {
+fn scan_reg_residue(id: &Identity, apps: &[AppEntry], self_id: &str, out: &mut Vec<Artifact>) {
     let roots: [(HKEY, &str, &str); 3] = [
         (HKEY_CURRENT_USER, "Software", "HKCU\\Software"),
         (HKEY_LOCAL_MACHINE, "Software", "HKLM\\Software"),
@@ -515,16 +710,23 @@ fn scan_reg_residue(id: &Identity, out: &mut Vec<Artifact>) {
                     nested = app_inventory::enum_subkey_names(child_key);
                     let _ = RegCloseKey(child_key);
                 }
-                for (relative_path, conf, reason) in registry_candidate_paths(&child, &nested, id) {
+                for (relative_path, confidence, reason) in registry_candidate_paths(&child, &nested, id) {
+                    let full_path = format!("{}\\{}", disp, relative_path);
+                    let (confidence, reason) =
+                        match apply_other_app_guard(&full_path, confidence, reason, apps, self_id) {
+                            Some(value) => value,
+                            None => continue,
+                        };
                     out.push(Artifact {
-                        path: format!("{}\\{}", disp, relative_path),
+                        path: full_path,
                         kind: ArtifactKind::RegKey,
                         category: Category::Config,
                         size: 0,
-                        confidence: conf,
+                        confidence,
                         source: "residue-reg".into(),
                         reversible: true,
                         match_reason: reason,
+                        auto_select: false,
                     });
                 }
             }
@@ -568,6 +770,7 @@ fn scan_related_services(known: &[PathBuf], out: &mut Vec<Artifact>) {
                         source: "service".into(),
                         reversible: true,
                         match_reason: format!("服务映像路径位于安装目录内：{}", image),
+                        auto_select: false,
                     });
                 }
             }
@@ -600,6 +803,7 @@ fn scan_related_startup(known: &[PathBuf], out: &mut Vec<Artifact>) {
                 source: "startup".into(),
                 reversible: true,
                 match_reason: format!("启动项命令指向安装目录：{}", item.command),
+                auto_select: false,
             });
         }
     }
@@ -607,7 +811,22 @@ fn scan_related_startup(known: &[PathBuf], out: &mut Vec<Artifact>) {
 
 // ─── 组装 ─────────────────────────────────────────────────────────────
 
-pub fn resolve(app: &AppEntry) -> Footprint {
+/// 默认勾选规则：只有“名称完全匹配 + 非用户数据 + 未被其他应用占用”的残留才预选。
+/// 其余项一律默认不选，必须由用户逐项确认。
+fn should_auto_select(artifact: &Artifact) -> bool {
+    matches!(artifact.kind, ArtifactKind::Dir | ArtifactKind::RegKey)
+        && artifact.source.starts_with("residue")
+        && artifact.confidence == Confidence::High
+        && artifact.category != Category::UserData
+}
+
+fn mark_auto_select(artifacts: &mut [Artifact]) {
+    for artifact in artifacts {
+        artifact.auto_select = should_auto_select(artifact);
+    }
+}
+
+fn resolve_with_apps(app: &AppEntry, apps: &[AppEntry]) -> Footprint {
     let (roots, warnings) = known_roots(app);
     let id = identity(&app.name, &app.publisher);
     let mut artifacts: Vec<Artifact> = Vec::new();
@@ -624,13 +843,15 @@ pub fn resolve(app: &AppEntry) -> Footprint {
             source: "install-dir".into(),
             reversible: true,
             match_reason: "应用安装目录".into(),
+            auto_select: false,
         });
     }
 
     scan_related_services(&roots, &mut artifacts);
     scan_related_startup(&roots, &mut artifacts);
-    scan_fs_residue(&id, &roots, &mut artifacts);
-    scan_reg_residue(&id, &mut artifacts);
+    scan_fs_residue(&id, &roots, apps, &app.id, &mut artifacts);
+    scan_reg_residue(&id, apps, &app.id, &mut artifacts);
+    mark_auto_select(&mut artifacts);
 
     let total_size: u64 = artifacts.iter().map(|a| a.size).sum();
     let high_conf_size: u64 = artifacts
@@ -715,6 +936,7 @@ fn rescan_cached(app_id: &str) -> Option<Footprint> {
         }
         artifacts.push(a);
     }
+    mark_auto_select(&mut artifacts);
     let total_size: u64 = artifacts.iter().map(|x| x.size).sum();
     let high_conf_size: u64 = artifacts
         .iter()
@@ -747,9 +969,9 @@ fn rescan_cached(app_id: &str) -> Option<Footprint> {
 /// 缓存 + 逐项存在性复扫，只返回仍残留的产物——这样"卸载后清理残留"才成立。
 pub fn resolve_by_id(app_id: &str) -> Result<Footprint, String> {
     let apps = app_inventory::list_installed_apps();
-    match apps.into_iter().find(|a| a.id == app_id) {
+    match apps.iter().find(|a| a.id == app_id) {
         Some(app) => {
-            let fp = resolve(&app);
+            let fp = resolve_with_apps(app, &apps);
             cache_put(&fp);
             Ok(fp)
         }
@@ -801,6 +1023,17 @@ mod tests {
     }
 
     #[test]
+    fn distinctive_product_suffix_is_not_dropped() {
+        // 复现：产品名中的 "++" 被 compact 丢弃后，Codex++ 与 Codex 被视为同一产品，
+        // 导致 OpenAI Codex 的数据目录被当成 Codex++ 的残留并被默认勾选。
+        let id = identity("Codex++", "BigPizzaV3");
+        assert!(matches!(name_match("Codex++", &id), Some((Confidence::High, _))));
+        assert!(name_match("Codex", &id).is_none());
+        assert!(name_match("OpenAI.Codex_26.1106.6628.0_x64__2p2nqsd0c76g0", &id).is_none());
+        assert!(name_match("OpenAI", &id).is_none());
+    }
+
+    #[test]
     fn generic_tokens_dropped() {
         // "Cockpit Tools" 的 "tools" 是通用词，应被丢弃，避免撞任意 Tools 目录
         let id = identity("Cockpit Tools", "jlcodes");
@@ -841,13 +1074,107 @@ mod tests {
         fs::write(product.join("data.bin"), [0u8; 16]).unwrap();
 
         let mut artifacts = Vec::new();
-        scan_fs_root(&root, &identity("Test App", "Vendor Suite LLC"), &[], &mut artifacts);
+        scan_fs_root(&root, &identity("Test App", "Vendor Suite LLC"), &[], &[], "", &mut artifacts);
 
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].path, product.to_string_lossy());
         assert_eq!(artifacts[0].confidence, Confidence::High);
         assert_eq!(artifacts[0].size, 16);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn nested_match_under_unrelated_vendor_is_review_only() {
+        let root = std::env::temp_dir().join(format!("wintop-foreign-vendor-{}", std::process::id()));
+        let product = root.join("OpenAI").join("Codex");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&product).unwrap();
+        fs::write(product.join("data.bin"), [0u8; 8]).unwrap();
+
+        let mut artifacts = Vec::new();
+        // 产品名与父目录 OpenAI 无隶属关系，发行商也不是 OpenAI → 只能作为复核项
+        scan_fs_root(&root, &identity("Codex", "BigPizzaV3"), &[], &[], "", &mut artifacts);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].confidence, Confidence::Medium);
+        assert!(!should_auto_select(&artifacts[0]));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn sample_app(id: &str, name: &str, publisher: &str, install: &str) -> AppEntry {
+        AppEntry {
+            id: id.into(),
+            name: name.into(),
+            publisher: publisher.into(),
+            version: "1.0".into(),
+            install_date: String::new(),
+            install_location: install.into(),
+            estimated_size_kb: 0,
+            uninstall_string: String::new(),
+            quiet_uninstall_string: String::new(),
+            display_icon: String::new(),
+            is_msi: false,
+            product_code: String::new(),
+            arch: "x64".into(),
+            source: "HKLM".into(),
+        }
+    }
+
+    #[test]
+    fn other_installed_app_claims_are_excluded_or_reviewed() {
+        let apps = vec![sample_app(
+            "app-codex",
+            "Codex",
+            "OpenAI",
+            "C:\\Users\\me\\AppData\\Local\\OpenAI\\Codex",
+        )];
+        // 其他应用的安装目录内 → 直接排除，不展示为待清理项
+        assert!(matches!(
+            other_app_conflict(
+                "C:\\Users\\me\\AppData\\Local\\OpenAI\\Codex\\sessions",
+                &apps,
+                "app-codex-plus"
+            ),
+            Some(OwnershipConflict::OtherAppDir(_))
+        ));
+        // 与其他已安装应用同名 → 降级复核
+        assert!(matches!(
+            other_app_conflict("C:\\Users\\me\\AppData\\Roaming\\Codex", &apps, "app-codex-plus"),
+            Some(OwnershipConflict::SameName(_))
+        ));
+        // 应用自己的产物不算冲突
+        assert!(other_app_conflict(
+            "C:\\Users\\me\\AppData\\Roaming\\Codex",
+            &apps,
+            "app-codex"
+        )
+        .is_none());
+
+        // ARP 误把共享根填成安装目录时，不能据此排除整个 Program Files
+        let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".into());
+        let broad = vec![sample_app("app-broad", "Broad App", "Some Vendor", &program_files)];
+        let candidate = format!("{}\\OtherVendor\\Data", program_files);
+        assert!(!is_shared_container(&candidate));
+        assert!(is_shared_container(&program_files));
+        assert!(other_app_conflict(&candidate, &broad, "self").is_none());
+    }
+
+    #[test]
+    fn auto_select_requires_strong_exclusive_residue() {
+        let artifact = |confidence, category, source: &str| Artifact {
+            path: "C:\\Test".into(),
+            kind: ArtifactKind::Dir,
+            category,
+            size: 0,
+            confidence,
+            source: source.into(),
+            reversible: true,
+            match_reason: String::new(),
+            auto_select: false,
+        };
+        assert!(should_auto_select(&artifact(Confidence::High, Category::Cache, "residue-fs")));
+        assert!(!should_auto_select(&artifact(Confidence::Medium, Category::Cache, "residue-fs")));
+        assert!(!should_auto_select(&artifact(Confidence::High, Category::UserData, "residue-fs")));
+        assert!(!should_auto_select(&artifact(Confidence::High, Category::Binary, "install-dir")));
     }
 
     #[test]
@@ -893,6 +1220,7 @@ mod tests {
                 source: "install-dir".into(),
                 reversible: true,
                 match_reason: "测试安装目录".into(),
+                auto_select: false,
             }],
             total_size: 0,
             high_conf_size: 0,
@@ -916,7 +1244,7 @@ mod tests {
             Some(a) => a.clone(),
             None => return, // 该机器无带安装目录的应用则跳过
         };
-        let fp = resolve(&app);
+        let fp = resolve_with_apps(&app, &apps);
         // 安装目录应作为 High 置信产物出现
         assert_eq!(fp.app_id, app.id);
         assert!(fp.artifacts.iter().any(|a| a.confidence == Confidence::High));

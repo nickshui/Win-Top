@@ -1,5 +1,6 @@
 <script>
   import { createEventDispatcher } from "svelte";
+  import { groupResidueArtifacts } from "../../uninstallWorkflow.js";
 
   export let artifacts = [];
   export let selectedPaths = new Set();
@@ -7,16 +8,12 @@
 
   const dispatch = createEventDispatcher();
 
-  const removable = (item) => item.kind === "dir" || item.kind === "reg-key";
-  const recommendedItem = (item) =>
-    removable(item) &&
-    item.source?.startsWith("residue") &&
-    item.confidence === "high" &&
-    item.category !== "user-data";
-
-  $: recommended = artifacts.filter(recommendedItem);
-  $: review = artifacts.filter((item) => removable(item) && !recommendedItem(item));
-  $: related = artifacts.filter((item) => !removable(item));
+  let recommended = [];
+  let review = [];
+  let related = [];
+  // 是否可默认勾选、是否需要复核由后端标记与匹配强度共同决定，
+  // 弱匹配项只进入“仅供参考”，不提供批量清理入口。
+  $: ({ recommended, review, related } = groupResidueArtifacts(artifacts));
 
   const kindLabel = (kind) =>
     ({ dir: "目录", "reg-key": "注册表", service: "服务", startup: "启动项" }[kind] || kind);
@@ -32,9 +29,9 @@
 </script>
 
 {#each [
-  { title: "建议清理", note: "完整产品名匹配且不含用户数据，已默认选中", rows: recommended, tone: "safe" },
-  { title: "需要复核", note: "共享目录、安装目录或归属依据不足，默认不选", rows: review, tone: "review" },
-  { title: "仅供参考", note: "服务和启动项仍由厂商卸载器处理", rows: related, tone: "related" },
+  { title: "建议清理", note: "名称与产品完全一致、未被其他软件引用且不含用户数据，已默认选中", rows: recommended, tone: "safe" },
+  { title: "需要复核", note: "名称相近、共享目录或可能属于其他软件，默认不选，请确认后手动勾选", rows: review, tone: "review" },
+  { title: "仅供参考", note: "服务、启动项与弱匹配项仅供定位，不参与批量清理", rows: related, tone: "related" },
 ] as group}
   {#if group.rows.length}
     <section class="group {group.tone}">

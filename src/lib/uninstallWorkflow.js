@@ -60,17 +60,32 @@ export function summarizeFootprint(footprint = {}) {
 
 export function defaultSelectedPaths(artifacts = [], appRemoved = false) {
   if (!appRemoved) return new Set();
+  // 是否可默认勾选由后端统一判定：名称完全匹配、未被其他已安装软件占用、
+  // 且不属于用户数据。前端不再自行按置信度推断，避免安全规则两处漂移。
   return new Set(
-    artifacts
-      .filter(
-        (artifact) =>
-          (artifact.kind === "dir" || artifact.kind === "reg-key") &&
-          artifact.source?.startsWith("residue") &&
-          artifact.confidence === "high" &&
-          artifact.category !== "user-data"
-      )
-      .map((artifact) => artifact.path)
+    artifacts.filter((artifact) => artifact.auto_select === true).map((artifact) => artifact.path)
   );
+}
+
+export function isRemovableResidue(artifact = {}) {
+  return artifact.kind === "dir" || artifact.kind === "reg-key";
+}
+
+/**
+ * 残留复核分组。只有后端明确标记 auto_select 的项才进入“建议清理”；
+ * 弱匹配项只用于定位，不提供批量清理入口。
+ */
+export function groupResidueArtifacts(artifacts = []) {
+  const removable = artifacts.filter(isRemovableResidue);
+  return {
+    recommended: removable.filter((artifact) => artifact.auto_select === true),
+    review: removable.filter(
+      (artifact) => artifact.auto_select !== true && artifact.confidence !== "low"
+    ),
+    related: artifacts.filter(
+      (artifact) => !isRemovableResidue(artifact) || artifact.confidence === "low"
+    ),
+  };
 }
 
 export function recommendationLabel(score = {}) {

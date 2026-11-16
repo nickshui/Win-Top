@@ -5,6 +5,7 @@ import {
   createWorkflow,
   transition,
   defaultSelectedPaths,
+  groupResidueArtifacts,
   summarizeFootprint,
   recommendationLabel,
   isCurrentRequest,
@@ -57,15 +58,32 @@ test("应用概况按真实产物分类汇总体积和系统项", () => {
   });
 });
 
-test("卸载后只默认选择高置信的非用户数据残留", () => {
+test("默认只勾选后端标记为可自动清理的残留", () => {
   const artifacts = [
-    { path: "C:\\Safe", kind: "dir", source: "residue-fs", confidence: "high", category: "cache" },
+    { path: "C:\\Safe", kind: "dir", source: "residue-fs", confidence: "high", category: "cache", auto_select: true },
+    // 名称相近/共享目录/与其他软件冲突的项，即使高置信也不能预选
+    { path: "C:\\Shared", kind: "dir", source: "residue-fs", confidence: "high", category: "cache", auto_select: false },
     { path: "C:\\Review", kind: "dir", source: "residue-fs", confidence: "medium", category: "config" },
     { path: "C:\\Install", kind: "dir", source: "install-dir", confidence: "high", category: "binary" },
     { path: "C:\\User", kind: "dir", source: "residue-fs", confidence: "high", category: "user-data" },
   ];
   assert.deepEqual([...defaultSelectedPaths(artifacts, true)], ["C:\\Safe"]);
   assert.equal(defaultSelectedPaths(artifacts, false).size, 0);
+});
+
+test("残留分组只把后端标记项放进建议清理，弱匹配项只读", () => {
+  const artifacts = [
+    { path: "A", kind: "dir", confidence: "high", auto_select: true },
+    { path: "B", kind: "dir", confidence: "high", auto_select: false },
+    { path: "C", kind: "dir", confidence: "medium" },
+    { path: "D", kind: "dir", confidence: "low" },
+    { path: "E", kind: "reg-key", confidence: "low" },
+    { path: "F", kind: "service", confidence: "high" },
+  ];
+  const groups = groupResidueArtifacts(artifacts);
+  assert.deepEqual(groups.recommended.map((item) => item.path), ["A"]);
+  assert.deepEqual(groups.review.map((item) => item.path), ["B", "C"]);
+  assert.deepEqual(groups.related.map((item) => item.path), ["D", "E", "F"]);
 });
 
 test("建议标签使用可解释等级且谨慎标记优先", () => {
