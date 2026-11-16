@@ -4,6 +4,7 @@
   import ResidueReview from "./ResidueReview.svelte";
 
   export let workflow;
+  export let capability = null;
   export let selectedPaths = new Set();
   export let selectedSize = 0;
   export let statusNote = "";
@@ -97,7 +98,12 @@
     </div>
   {:else if workflow.phase === "error"}
     <div class="error-card"><span aria-hidden="true">!</span><div><strong>操作未完成</strong><p role="alert">{workflow.error}</p></div></div>
-    <button class="ghost retry" on:click={() => dispatch("retry")}>重试</button>
+    <div class="result-actions">
+      {#if capability?.stale_entry && workflow.recoverPhase === "overview"}
+        <button class="ghost" on:click={() => dispatch("removeStale")}>清理无效卸载登记</button>
+      {/if}
+      <button class="ghost" on:click={() => dispatch("retry")}>重试</button>
+    </div>
   {/if}
 {/if}
 
@@ -144,6 +150,5 @@
   .error-card > span { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 50%; background: rgba(239,68,68,.14); color: #fca5a5; font-weight: 700; }
   .warnings { color: #fcd34d; font-size: 11px; line-height: 1.6; }
   .result-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-  .retry { margin-top: 10px; }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>

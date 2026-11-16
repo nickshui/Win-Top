@@ -33,6 +33,9 @@
   let pollTimer = null;
   let checking = false;
   let undoing = false;
+  let staleConfirm = false;
+  let staleResult = null;
+  let staleUndoing = false;
   let footprintCache = new Map();
 
   $: filtered = filterSort(apps, search, sortKey, sortDir, filters);
@@ -166,6 +169,8 @@
     capability = null;
     uninstallConfirm = false;
     cleanupConfirm = false;
+    staleConfirm = false;
+    staleResult = null;
     userDataAcknowledged = false;
     statusNote = "";
     selectedPaths = new Set();
@@ -199,7 +204,13 @@
     if (workflow.phase !== "overview") return;
     try {
       capability = await invoke("uninstall_capability", { appId: workflow.app.entry.id });
-      if (capability.mode === "unavailable") throw new Error(capability.message);
+      if (capability.mode === "unavailable") {
+        workflow = transition(workflow, "FAIL", {
+          error: capability.message,
+          recoverPhase: "overview",
+        });
+        return;
+      }
       uninstallConfirm = true;
     } catch (error) {
       workflow = transition(workflow, "FAIL", { error: String(error), recoverPhase: "overview" });
@@ -356,6 +367,43 @@
     }
   }
 
+  function requestStaleRemoval() {
+    if (workflow.phase !== "error" || !capability?.stale_entry) return;
+    staleConfirm = true;
+  }
+
+  async function confirmStaleRemoval() {
+    staleConfirm = false;
+    try {
+      staleResult = await invoke("remove_stale_uninstall_entry", {
+        appId: workflow.app.entry.id,
+      });
+      await load();
+    } catch (error) {
+      pushToast("清理无效登记失败：" + error, "error");
+    }
+  }
+
+  async function undoStaleRemoval() {
+    if (!staleResult?.undo_token || staleUndoing) return;
+    staleUndoing = true;
+    try {
+      await invoke("undo_removal", { undoToken: staleResult.undo_token });
+      staleResult = null;
+      pushToast("已恢复卸载登记", "ok");
+      await finishWorkflow();
+    } catch (error) {
+      pushToast("撤销失败：" + error, "error");
+    } finally {
+      staleUndoing = false;
+    }
+  }
+
+  async function closeStaleResult() {
+    staleResult = null;
+    await finishWorkflow();
+  }
+
   function retryAfterError() {
     statusNote = "";
     const recovery = workflow.recoverPhase;
@@ -482,6 +530,7 @@
     <main class="ua-detail">
       <UninstallWorkflow
         {workflow}
+        {capability}
         {selectedPaths}
         {selectedSize}
         {statusNote}
@@ -497,6 +546,7 @@
         on:undo={undoRemoval}
         on:finish={finishWorkflow}
         on:retry={retryAfterError}
+        on:removeStale={requestStaleRemoval}
       />
     </main>
   </div>
@@ -528,6 +578,28 @@
   <div class="modal-actions">
     <button class="ghost" on:click={() => (cleanupConfirm = false)}>取消</button>
     <button class="danger-button" disabled={selectedUserData.length > 0 && !userDataAcknowledged} on:click={cleanSelected}>确认清理</button>
+  </div>
+</Modal>
+
+<Modal open={staleConfirm} title="清理无效卸载登记" on:close={() => (staleConfirm = false)}>
+  <div class="confirm-copy">
+    <p>「{workflow.app?.entry.name}」的卸载程序或安装目录已不存在，Win-Top 无法启动厂商卸载器。</p>
+    <p class="muted">将移除它在注册表中的卸载登记，不会删除任何文件。登记会先导出为 .reg 备份，可撤销。</p>
+  </div>
+  <div class="modal-actions">
+    <button class="ghost" on:click={() => (staleConfirm = false)}>取消</button>
+    <button class="danger-button" on:click={confirmStaleRemoval}>确认清理登记</button>
+  </div>
+</Modal>
+
+<Modal open={!!staleResult} title="无效登记已清理" on:close={closeStaleResult}>
+  <div class="confirm-copy">
+    <p>已移除「{staleResult?.app_name}」的无效卸载登记。</p>
+    <p class="muted">备份保存在隔离区，可撤销恢复该登记。</p>
+  </div>
+  <div class="modal-actions">
+    <button class="ghost" disabled={staleUndoing} on:click={undoStaleRemoval}>{staleUndoing ? "正在撤销…" : "撤销"}</button>
+    <button class="primary" on:click={closeStaleResult}>关闭</button>
   </div>
 </Modal>
 

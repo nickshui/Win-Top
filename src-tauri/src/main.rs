@@ -600,6 +600,18 @@ async fn start_uninstaller(app_id: String, allow_quiet: bool) -> Result<String, 
 
 #[cfg(target_os = "windows")]
 #[tauri::command]
+async fn remove_stale_uninstall_entry(
+    app_id: String,
+) -> Result<uninstall::StaleEntryResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall::remove_stale_uninstall_entry(&app_id)
+    })
+    .await
+    .unwrap_or_else(|_| Err("清理无效卸载登记任务异常退出".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
 async fn is_app_installed(app_id: String) -> bool {
     tauri::async_runtime::spawn_blocking(move || uninstall::is_app_installed(&app_id))
         .await
@@ -892,6 +904,7 @@ fn main() {
             list_apps_scored,
             uninstall_capability,
             start_uninstaller,
+            remove_stale_uninstall_entry,
             is_app_installed,
             remove_residue,
             undo_removal

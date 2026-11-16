@@ -38,11 +38,21 @@ pub struct RemovalResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct StaleEntryResult {
+    pub undo_token: String,
+    pub key: String,
+    pub app_name: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ManifestItem {
     kind: String, // fs | reg
     original: String,
     stored: String,
+    /// 注册表导出/导入使用的视图（/reg:32 或 /reg:64）；旧清单缺省为默认视图。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    view: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,6 +91,8 @@ pub enum UninstallMode {
 pub struct UninstallCapability {
     pub mode: UninstallMode,
     pub message: String,
+    /// 卸载程序或安装目录均已缺失，属于残留注册项；可安全移除登记。
+    pub stale_entry: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -90,22 +102,94 @@ struct SelectedCommand {
     mode: UninstallMode,
 }
 
+/// 卸载命令中的可执行文件是否真实存在（支持 %VAR% 展开；msiexec 视为系统可用）。
+fn command_exe_exists(exe: &str) -> bool {
+    let expanded = app_inventory::expand_env(exe.trim());
+    let lower = expanded.to_lowercase();
+    if lower == "msiexec.exe" || lower == "msiexec" {
+        return true;
+    }
+    let path = Path::new(&expanded);
+    if path.is_absolute() {
+        return path.is_file();
+    }
+    // 裸文件名（rundll32.exe / cmd.exe 等）：只接受 System32 中确实存在的文件，
+    // 不按相对路径猜测，避免把无效登记误判为可卸载。
+    std::env::var_os("WINDIR")
+        .map(|windir| PathBuf::from(windir).join("System32").join(&expanded).is_file())
+        .unwrap_or(false)
+}
+
 fn capability_for(app: &app_inventory::AppEntry) -> UninstallCapability {
-    if !app.uninstall_string.is_empty() || (app.is_msi && !app.product_code.is_empty()) {
-        UninstallCapability {
+    // 交互式卸载程序存在 → 正常交互卸载
+    if !app.uninstall_string.is_empty() {
+        let (exe, _) = split_command(&app.uninstall_string);
+        if command_exe_exists(&exe) {
+            return UninstallCapability {
+                mode: UninstallMode::Interactive,
+                message: "将打开厂商卸载器，由你确认卸载选项。".into(),
+                stale_entry: false,
+            };
+        }
+    }
+    // MSI 产品码可交给 Windows Installer
+    if app.is_msi && !app.product_code.is_empty() {
+        return UninstallCapability {
             mode: UninstallMode::Interactive,
-            message: "将打开厂商卸载器，由你确认卸载选项。".into(),
+            message: "将通过 Windows Installer 卸载该应用。".into(),
+            stale_entry: false,
+        };
+    }
+    // 交互式缺失但静默卸载程序存在 → 仍需用户明确确认
+    if !app.quiet_uninstall_string.is_empty() {
+        let (exe, _) = split_command(&app.quiet_uninstall_string);
+        if command_exe_exists(&exe) {
+            return UninstallCapability {
+                mode: UninstallMode::Quiet,
+                message: if app.uninstall_string.is_empty() {
+                    "该应用只提供静默卸载，确认后可能不显示厂商界面。".into()
+                } else {
+                    "交互式卸载程序不存在，仅提供静默卸载。".into()
+                },
+                stale_entry: false,
+            };
         }
+    }
+
+    // 没有任何可执行命令：判断是否连安装目录也已消失，属于残留登记。
+    let command = if !app.uninstall_string.is_empty() {
+        Some(app.uninstall_string.as_str())
     } else if !app.quiet_uninstall_string.is_empty() {
-        UninstallCapability {
-            mode: UninstallMode::Quiet,
-            message: "该应用只提供静默卸载，确认后可能不显示厂商界面。".into(),
-        }
+        Some(app.quiet_uninstall_string.as_str())
     } else {
-        UninstallCapability {
-            mode: UninstallMode::Unavailable,
-            message: "该应用没有可用的卸载命令。".into(),
-        }
+        None
+    };
+    let missing_exe = command
+        .map(|cmd| split_command(cmd).0)
+        .filter(|exe| {
+            let expanded = app_inventory::expand_env(exe);
+            let path = Path::new(&expanded);
+            path.is_absolute() && !path.is_file()
+        });
+    let install_missing = !app.install_location.trim().is_empty()
+        && !Path::new(&app_inventory::expand_env(&app.install_location)).exists();
+    let stale_entry = install_missing || missing_exe.is_some();
+    let detail = match missing_exe {
+        Some(exe) => format!("卸载程序不存在：{}", exe),
+        None => "未提供可用的卸载命令".to_string(),
+    };
+    let message = if stale_entry {
+        let install_note = if install_missing { "，安装目录也不存在" } else { "" };
+        format!(
+            "{detail}{install_note}；该条目可能是残留登记，可清理无效的卸载登记。"
+        )
+    } else {
+        format!("{detail}；无法自动启动卸载。")
+    };
+    UninstallCapability {
+        mode: UninstallMode::Unavailable,
+        message,
+        stale_entry,
     }
 }
 
@@ -183,7 +267,29 @@ pub fn start_uninstaller(app_id: &str, allow_quiet: bool) -> Result<String, Stri
         .into_iter()
         .find(|a| a.id == app_id)
         .ok_or_else(|| "未找到应用".to_string())?;
-    let selected = select_uninstall_command(&app, allow_quiet)?;
+    let mut selected = select_uninstall_command(&app, allow_quiet)?;
+    if !command_exe_exists(&selected.exe) {
+        // 交互式卸载程序可能已被删除；若静默卸载程序仍存在，允许改用静默方式。
+        if !app.quiet_uninstall_string.is_empty() {
+            let (exe, params) = split_command(&app.quiet_uninstall_string);
+            if command_exe_exists(&exe) {
+                if !allow_quiet {
+                    return Err("交互式卸载程序不存在，仅提供静默卸载，需要明确确认".into());
+                }
+                selected = SelectedCommand {
+                    exe,
+                    params,
+                    mode: UninstallMode::Quiet,
+                };
+            }
+        }
+    }
+    if !command_exe_exists(&selected.exe) {
+        return Err(format!(
+            "卸载程序不存在：{}。该条目可能是残留登记，可在应用详情中清理。",
+            selected.exe
+        ));
+    }
     launch(&selected.exe, &selected.params)
 }
 
@@ -262,31 +368,50 @@ fn new_token() -> String {
     format!("wintop_{}", ms)
 }
 
-fn reg_export(key: &str, file: &Path) -> bool {
+fn reg_run(args: &[String]) -> bool {
     Command::new("reg")
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["export", key, &file.to_string_lossy(), "/y"])
+        .args(args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+fn reg_export_view(key: &str, file: &Path, view: Option<&str>) -> bool {
+    let mut args = vec![
+        "export".to_string(),
+        key.to_string(),
+        file.to_string_lossy().to_string(),
+        "/y".to_string(),
+    ];
+    if let Some(view) = view {
+        args.push(view.to_string());
+    }
+    reg_run(&args)
+}
+
+fn reg_delete_view(key: &str, view: Option<&str>) -> bool {
+    let mut args = vec!["delete".to_string(), key.to_string(), "/f".to_string()];
+    if let Some(view) = view {
+        args.push(view.to_string());
+    }
+    reg_run(&args)
+}
+
+fn reg_import_view(file: &Path, view: Option<&str>) -> bool {
+    let mut args = vec!["import".to_string(), file.to_string_lossy().to_string()];
+    if let Some(view) = view {
+        args.push(view.to_string());
+    }
+    reg_run(&args)
+}
+
+fn reg_export(key: &str, file: &Path) -> bool {
+    reg_export_view(key, file, None)
 }
 
 fn reg_delete(key: &str) -> bool {
-    Command::new("reg")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["delete", key, "/f"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn reg_import(file: &Path) -> bool {
-    Command::new("reg")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["import", &file.to_string_lossy()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    reg_delete_view(key, None)
 }
 
 /// 删除用户确认的残留（文件/目录 -> 隔离区；注册表键 -> 导出后删除）。可用 undo_token 撤销。
@@ -312,10 +437,12 @@ pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
             }
         }
     };
-    let mut valid: std::collections::HashMap<String, (footprint::ArtifactKind, u64)> =
-        std::collections::HashMap::new();
+    let mut valid: std::collections::HashMap<
+        String,
+        (footprint::ArtifactKind, u64, footprint::Confidence),
+    > = std::collections::HashMap::new();
     for a in &fp.artifacts {
-        valid.insert(a.path.to_lowercase(), (a.kind, a.size));
+        valid.insert(a.path.to_lowercase(), (a.kind, a.size, a.confidence));
     }
 
     let token = new_token();
@@ -335,7 +462,7 @@ pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
     let mut n = 0u32;
 
     for t in &targets {
-        let (kind, size) = match valid.get(&t.to_lowercase()) {
+        let (kind, size, confidence) = match valid.get(&t.to_lowercase()) {
             Some(v) => *v,
             None => {
                 warnings.push(format!("跳过（不在解析结果内，安全拦截）：{}", t));
@@ -343,6 +470,12 @@ pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
                 continue;
             }
         };
+        // 弱匹配项（仅名称片段相似）不允许自动清理，必须由用户手动定位确认。
+        if confidence == footprint::Confidence::Low {
+            warnings.push(format!("跳过（弱匹配项，归属不确定，请手动确认）：{}", t));
+            skipped += 1;
+            continue;
+        }
         match kind {
             footprint::ArtifactKind::Dir => {
                 if is_protected(t) {
@@ -362,6 +495,7 @@ pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
                             kind: "fs".into(),
                             original: t.clone(),
                             stored: dest.to_string_lossy().into(),
+                            view: None,
                         });
                         freed += size;
                         removed += 1;
@@ -380,6 +514,7 @@ pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
                         kind: "reg".into(),
                         original: t.clone(),
                         stored: file.to_string_lossy().into(),
+                        view: None,
                     });
                     removed += 1;
                 } else {
@@ -413,6 +548,76 @@ pub fn remove_residue(app_id: &str, targets: Vec<String>) -> RemovalResult {
     }
 }
 
+/// 清理“卸载程序/安装目录都已不存在”的残留注册项。
+/// 只删除 ARP 登记本身，不动任何文件；删除前导出 .reg 备份，可通过 undo_removal 恢复。
+pub fn remove_stale_uninstall_entry(app_id: &str) -> Result<StaleEntryResult, String> {
+    let app = app_inventory::list_installed_apps()
+        .into_iter()
+        .find(|a| a.id == app_id)
+        .ok_or_else(|| "未找到应用".to_string())?;
+    let capability = capability_for(&app);
+    if !capability.stale_entry {
+        return Err("该应用仍有可用的卸载程序或安装目录，不能按无效登记清理".into());
+    }
+
+    let (source, subkey) = app
+        .id
+        .split_once('|')
+        .ok_or_else(|| "无法识别注册表位置".to_string())?;
+    if subkey.is_empty() || subkey.contains('\\') || subkey.contains('/') {
+        return Err("注册表子键不合法，已拒绝操作".into());
+    }
+    let (root, view) = match source {
+        "HKCU" => (
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "/reg:64",
+        ),
+        "HKLM" => (
+            "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "/reg:64",
+        ),
+        "HKLM-WOW" => (
+            "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+            "/reg:32",
+        ),
+        _ => return Err("未知的注册表来源".into()),
+    };
+    let key = format!("{}\\{}", root, subkey);
+
+    let token = new_token();
+    let qdir = quarantine_base().join(&token);
+    fs::create_dir_all(&qdir).map_err(|e| format!("无法创建隔离目录：{}", e))?;
+    let backup = qdir.join("reg_0.reg");
+    if !reg_export_view(&key, &backup, Some(view)) {
+        return Err("导出注册表备份失败，未做任何修改".into());
+    }
+    if !reg_delete_view(&key, Some(view)) {
+        return Err("删除无效卸载登记失败（备份已保留）".into());
+    }
+
+    let manifest = Manifest {
+        app_id: app.id.clone(),
+        app_name: app.name.clone(),
+        items: vec![ManifestItem {
+            kind: "reg".into(),
+            original: key.clone(),
+            stored: backup.to_string_lossy().into(),
+            view: Some(view.to_string()),
+        }],
+    };
+    fs::write(
+        qdir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+    )
+    .map_err(|e| format!("写入隔离清单失败：{}", e))?;
+
+    Ok(StaleEntryResult {
+        undo_token: token,
+        key,
+        app_name: app.name,
+    })
+}
+
 /// 撤销一次残留清理：文件移回原处、注册表键重新导入。
 pub fn undo_removal(undo_token: &str) -> Result<String, String> {
     let qdir = quarantine_base().join(undo_token);
@@ -434,7 +639,7 @@ pub fn undo_removal(undo_token: &str) -> Result<String, String> {
                 }
             }
             "reg" => {
-                if reg_import(Path::new(&it.stored)) {
+                if reg_import_view(Path::new(&it.stored), it.view.as_deref()) {
                     restored += 1;
                 } else {
                     failed += 1;
@@ -528,6 +733,60 @@ mod tests {
             Err("应用仍处于安装状态，不能清理产物")
         );
         assert!(ensure_app_removed(false).is_ok());
+    }
+
+    #[test]
+    fn missing_uninstaller_and_install_dir_is_stale() {
+        let dir = std::env::temp_dir().join(format!("wintop-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let missing_exe = dir.join("missing-uninstall.exe");
+        let mut app = test_app(&format!("\"{}\"", missing_exe.to_string_lossy()), "", false, "");
+        app.install_location = dir.join("install").to_string_lossy().to_string();
+
+        let capability = capability_for(&app);
+        assert_eq!(capability.mode, UninstallMode::Unavailable);
+        assert!(capability.stale_entry);
+        assert!(capability.message.contains("卸载程序不存在"));
+    }
+
+    #[test]
+    fn existing_uninstaller_is_interactive() {
+        let dir = std::env::temp_dir().join(format!("wintop-live-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("uninstall.exe");
+        fs::write(&exe, b"stub").unwrap();
+        let mut app = test_app(&format!("\"{}\"", exe.to_string_lossy()), "", false, "");
+        app.install_location = dir.to_string_lossy().to_string();
+
+        let capability = capability_for(&app);
+        assert_eq!(capability.mode, UninstallMode::Interactive);
+        assert!(!capability.stale_entry);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bare_system_uninstaller_is_available() {
+        assert!(command_exe_exists("rundll32.exe"));
+        let app = test_app("rundll32.exe \"C:\\x.dll\",Uninstall", "", false, "");
+        assert_eq!(capability_for(&app).mode, UninstallMode::Interactive);
+    }
+
+    #[test]
+    fn no_command_without_install_evidence_is_not_stale() {
+        let app = test_app("", "", false, "");
+        let capability = capability_for(&app);
+        assert_eq!(capability.mode, UninstallMode::Unavailable);
+        assert!(!capability.stale_entry);
+    }
+
+    #[test]
+    fn manifest_without_view_stays_compatible() {
+        let manifest: Manifest = serde_json::from_str(
+            r#"{"app_id":"a","app_name":"A","items":[{"kind":"reg","original":"HKCU\\X","stored":"C:\\x.reg"}]}"#,
+        )
+        .unwrap();
+        assert!(manifest.items[0].view.is_none());
     }
 
     #[test]
