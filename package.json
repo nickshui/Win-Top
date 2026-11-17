@@ -2,6 +2,19 @@
   "name": "win-top",
   "private": true,
   "version": "0.1.12",
+  "description": "开源 Windows 优化加速与系统监控工具",
+  "keywords": [
+    "windows",
+    "windows-optimization",
+    "performance",
+    "memory-cleaner",
+    "startup-manager",
+    "disk-cleaner",
+    "system-monitor",
+    "tauri",
+    "rust",
+    "svelte"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

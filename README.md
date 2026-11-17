@@ -5,11 +5,21 @@
 ![Tech](https://img.shields.io/badge/Tauri%20%2B%20Rust%20%2B%20Svelte-24292f)
 ![Native](https://img.shields.io/badge/native%20APIs-PDH%20%2F%20ETW%20%2F%20WMI%20%2F%20WinAPI-16a34a)
 
-**Win-Top 是一款 Windows 系统监控与资源管理工具。** 它把平时要开一堆工具才能看清的东西——进程与 GPU 占用、端口占用、磁盘空间、网络吞吐、开机启动项——收进一个桌面工作台，并提供 AI 辅助判断。
+**Win-Top 是一款开源的 Windows 优化加速与系统监控工具。** 它把「让 Windows 长期保持流畅」真正需要的几件事——内存自动加速、开机启动项治理、C 盘空间分析与垃圾清理、进程 / 端口 / GPU 占用排查——收进一个原生桌面工作台，同时提供接近任务管理器之外的细粒度监控与诊断能力。
+
+**English:** an open-source Windows optimizer and system monitor for memory boost, startup management, disk cleanup, and process / GPU / port diagnostics.
 
 所有**监控数据**都**直调 Windows 原生接口**（PDH 性能计数器 / ETW / WMI / WinAPI）采集，进程与端口信息不通过 `netstat`、`tasklist` 之类的命令行工具获取；默认普通权限运行即可用，只有 ETW 实时事件与磁盘温度需要管理员。
 
-> 适用场景：任务管理器看不够细的时候（**每进程 GPU 占用与显存**、端口到底被谁占着、磁盘空间去哪了、开机为什么变慢）；也适合作为一台 Windows 机器的常驻健康看板。
+> 适用场景：Windows 越用越卡、开机启动变慢、C 盘空间告急、内存占用长期偏高、端口不知道被谁占用、任务管理器看不细（**每进程 GPU 占用与显存**、磁盘空间去哪了）；也适合作为一台 Windows 机器的常驻健康看板。
+
+## 为什么选择 Win-Top
+
+- **保持 Windows 流畅**：内存持续高于阈值时自动加速释放，冷却与低收益退避避免反复打扰；一键加速把垃圾清理与内存释放串起来执行。
+- **开机更快**：注册表 Run、启动文件夹、商店应用启动任务三源对齐任务管理器，常用项一目了然，可随时禁用不用的自启。
+- **C 盘瘦身**：13 类系统垃圾清理 + TreeSize 式磁盘空间分析，快速定位大目录与大文件。
+- **卡顿有据可查**：进程 / GPU / 显存 / 端口 / 磁盘 I/O / 网络吞吐统一监控，配合实时事件流定位瞬时占用。
+- **原生、轻量、可解释**：Tauri + Rust + Svelte，直调 Windows API，无 shell 调用；监控口径与操作结果都有明确说明。
 
 ![Win-Top 概览：CPU / 内存 / 磁盘 I/O / 网络 / GPU 一屏总览](docs/screenshots/01-overview.png)
 
@@ -59,7 +69,7 @@
 - 整卷空间分析：TreeSize 式行内展开目录树（递归大小 / 文件数 / 占父级比例 / 修改时间，展开时按需加载文件），无需逐级重扫；扫描需手动开始，提供实时进度与取消；
 - 优先直读 NTFS MFT，非管理员或非 NTFS 自动回退逐目录扫描并标注实际方式；支持扫描指定文件夹；扫描结果在页面切换间保留，可随时重新扫描。
 
-### 优化与清理
+### Windows 优化与加速（内存清理 / 开机启动 / 垃圾清理）
 - 一键加速：垃圾扫描 → 清理 → 内存释放串联执行，完成后报告释放的磁盘与内存；
 - 系统体检：0–100 评分 + 问题清单 + 建议，一键优化后自动复检；
 - 垃圾清理 **13 类**：用户 / 系统临时文件、回收站、缩略图缓存、Windows Update 缓存、Prefetch、Edge / Chrome / IE 缓存、最近文档、DNS 缓存、字体缓存、传递优化文件；需管理员的分类在未提权时锁定；
@@ -239,6 +249,20 @@ npm run tauri build   # 构建安装包，产物在 src-tauri/target/release/bun
 | 远程管理与多设备监控 | 完全没做 | 需要网络服务端与账号体系 |
 | 插件生态与脚本分享 | 完全没做 | — |
 
+## 常见问题（Windows 优化）
+
+### Win-Top 能帮助 Windows 保持流畅吗？
+
+它通过**内存自动加速、开机启动项治理和垃圾清理**减少常见的卡顿来源。自动加速只在内存持续高于阈值时触发，并受冷却、低收益退避、电池供电、前台全屏、磁盘繁忙等场景守卫约束，不会频繁打扰。
+
+### 自动加速会删除文件吗？
+
+不会。自动加速只裁剪进程工作集、释放物理内存；垃圾清理是单独的操作，需要用户确认，且可在清理前创建系统还原点。
+
+### Win-Top 会拖慢系统吗？
+
+监控由后台常驻采集线程通过原生 API 完成，默认 1 秒采样；历史数据每 15 秒增量落盘，并对内存和磁盘占用设置上限。
+
 ## 设计原则
 
 - **安全第一**：危险操作必须二次确认。
@@ -255,9 +279,9 @@ Win-Top 的目标是成为 Windows 平台上专业、智能、可扩展的资源
 
 ## English
 
-**Win-Top is a Windows system monitor and resource manager** built with Tauri, Rust and Svelte.
+**Win-Top is an open-source Windows optimizer and system monitor** built with Tauri, Rust and Svelte.
 
-It unifies process management (**including per-process GPU usage and VRAM**), port-to-process mapping, disk space analysis, network throughput, startup-item control, app uninstalling and AI-assisted diagnosis into one desktop workbench. All monitoring data is collected straight from native Windows APIs (PDH / ETW / WMI / WinAPI) — **process and port data never come from shelling out to `netstat` or `tasklist`** — and it runs unelevated by default. (System-tool actions such as firewall rules, restore points, file unlocking and uninstalling do invoke built-in `netsh` / PowerShell / vendor uninstallers.)
+It combines **memory auto-boost, startup-item management, disk cleanup and C-drive space analysis** with process management (**including per-process GPU usage and VRAM**), port-to-process mapping, network throughput, app uninstalling and AI-assisted diagnosis in one desktop workbench — built to help Windows stay responsive over time. All monitoring data is collected straight from native Windows APIs (PDH / ETW / WMI / WinAPI) — **process and port data never come from shelling out to `netstat` or `tasklist`** — and it runs unelevated by default. (System-tool actions such as firewall rules, restore points, file unlocking and uninstalling do invoke built-in `netsh` / PowerShell / vendor uninstallers.)
 
 Highlights: per-process GPU utilization and dedicated/shared VRAM, a per-adapter GPU card, history trends persisted to disk (1 s raw for 7 days, 1 min rollups for 90 days, 200 MiB hard cap), NTFS MFT based whole-volume space analysis, ETW-driven real-time process and per-process network events, and in-app updates (check + one-click install: portable in-place replace, NSIS/MSI silent install; SHA-256 verified, no signing keys).
 
