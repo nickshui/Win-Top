@@ -1,6 +1,7 @@
 import { writable, get } from "svelte/store";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
+import { writeText as writeClipboard } from "@tauri-apps/api/clipboard";
 
 // 实时指标（来自后端常驻采集器的 metrics 事件）
 export const metrics = writable(null);
@@ -51,6 +52,22 @@ export function pushToast(message, kind = "ok") {
   setTimeout(() => {
     toasts.update((list) => list.filter((t) => t.id !== id));
   }, 3800);
+}
+
+/// 复制文本并给出统一反馈；右键菜单和行内按钮共用。
+export async function copyText(value, label = "内容") {
+  const text = String(value ?? "");
+  try {
+    // 优先走 Tauri 剪贴板（WebView2 下 navigator.clipboard 在部分环境不可用）。
+    try {
+      await writeClipboard(text);
+    } catch (_) {
+      await navigator.clipboard.writeText(text);
+    }
+    pushToast(`已复制${label}`, "ok");
+  } catch (error) {
+    pushToast("复制失败：" + error, "error");
+  }
 }
 
 // 权限 + ETW 实时事件

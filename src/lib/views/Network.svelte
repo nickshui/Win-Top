@@ -1,7 +1,8 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast, netTraffic, netTrafficAvailable, relaunchAdmin } from "../stores.js";
+  import { pushToast, netTraffic, netTrafficAvailable, relaunchAdmin, copyText } from "../stores.js";
+  import { openContextMenu } from "../contextMenu.js";
   import Modal from "../components/Modal.svelte";
 
   let rows = [];
@@ -199,6 +200,35 @@
     const r = await invoke("terminate_process", { pid: t.pid });
     pushToast(r.message, r.success ? "ok" : "error");
     refresh();
+  }
+
+  const endpoint = (addr, port) => (String(addr).includes(":") ? `[${addr}]:${port}` : `${addr}:${port}`);
+
+  function openTrafficMenu(event, t) {
+    openContextMenu(event, [
+      { label: "查看详情", action: () => showTrafficDetail(t.pid) },
+      {
+        label: "结束进程",
+        danger: true,
+        action: () => (killTarget = { pid: t.pid, process: t.name, port: null }),
+      },
+      { separator: true },
+      { label: "复制进程名", action: () => copyText(t.name, "进程名") },
+      { label: `复制 PID（${t.pid}）`, action: () => copyText(t.pid, "PID") },
+    ]);
+  }
+
+  function openPortMenu(event, r) {
+    openContextMenu(event, [
+      { label: "复制端口", action: () => copyText(r.port, "端口") },
+      { label: "复制本地地址", action: () => copyText(endpoint(r.local_addr, r.port), "本地地址") },
+      { label: "复制远端地址", action: () => copyText(r.remote, "远端地址") },
+      { separator: true },
+      { label: "复制进程名", action: () => copyText(r.process, "进程名") },
+      { label: `复制 PID（${r.pid}）`, action: () => copyText(r.pid, "PID") },
+      { separator: true },
+      { label: "结束占用进程", danger: true, action: () => (killTarget = r) },
+    ]);
   }
 </script>
 
@@ -399,6 +429,7 @@
                   class="traffic-row"
                   class:active-row={tDetailPid === t.pid}
                   on:click={() => showTrafficDetail(t.pid)}
+                  on:contextmenu={(e) => openTrafficMenu(e, t)}
                   title="点击查看进程详情"
                 >
                   <td class="col-proc" title={t.name}>{t.name}</td>
@@ -518,7 +549,7 @@
           <tr><td colspan="7" class="empty">无匹配连接</td></tr>
         {:else}
           {#each filtered as r}
-            <tr>
+            <tr on:contextmenu={(e) => openPortMenu(e, r)}>
               <td class="num mono">
                 <span class="port">{r.port}</span>
                 {#if COMMON_PORTS.has(r.port)}<span class="tag">常用</span>{/if}
@@ -547,12 +578,16 @@
 {/if}
 
 <!-- 结束端口进程确认（含同端口其它绑定分析）-->
-<Modal open={!!killTarget} title="结束端口进程" on:close={() => (killTarget = null)}>
+<Modal open={!!killTarget} title={killTarget?.port ? "结束端口进程" : "结束进程"} on:close={() => (killTarget = null)}>
   {#if killTarget}
     <p>
-      将结束 <strong>{killTarget.process}</strong>（PID {killTarget.pid}），
-      它占用 {killTarget.family} 的 {killTarget.protocol} 端口
-      <strong>{killTarget.port}</strong>{killTarget.state !== "-" ? `（${killTarget.state}）` : ""}。
+      {#if killTarget.port}
+        将结束 <strong>{killTarget.process}</strong>（PID {killTarget.pid}），
+        它占用 {killTarget.family} 的 {killTarget.protocol} 端口
+        <strong>{killTarget.port}</strong>{killTarget.state !== "-" ? `（${killTarget.state}）` : ""}。
+      {:else}
+        将结束 <strong>{killTarget.process}</strong>（PID {killTarget.pid}）。
+      {/if}
     </p>
 
     {#if killSameProc.length > 0}

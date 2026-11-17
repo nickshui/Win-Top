@@ -1,7 +1,8 @@
 <script>
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast, diskIo, gpuProc } from "../stores.js";
+  import { pushToast, diskIo, gpuProc, copyText } from "../stores.js";
+  import { openContextMenu, contextMenu } from "../contextMenu.js";
   import Modal from "../components/Modal.svelte";
 
   let rows = [];
@@ -272,6 +273,17 @@
     } finally { detailLoading = false; }
   }
 
+  function openProcessMenu(event, p) {
+    openContextMenu(event, [
+      { label: "查看详情", action: () => showDetail(p.pid) },
+      { label: "设置优先级", action: () => (prioTarget = p) },
+      { label: "结束进程", danger: true, action: () => (termTarget = p) },
+      { separator: true },
+      { label: "复制进程名", action: () => copyText(p.name, "进程名") },
+      { label: `复制 PID（${p.pid}）`, action: () => copyText(p.pid, "PID") },
+    ]);
+  }
+
   onMount(() => {
     const saved = loadWidths();
     cols = cols.map((c) => (c.flex ? c : { ...c, w: saved[c.key] }));
@@ -295,7 +307,7 @@
   });
 
   // 选中某行详情、或打开结束/优先级菜单时，冻结刷新以保证选中稳定。
-  $: frozen = detailPid != null || termTarget != null || prioTarget != null;
+  $: frozen = detailPid != null || termTarget != null || prioTarget != null || $contextMenu != null;
 
   function setSort(k) {
     if (sortKey === k) sortDir = -sortDir;
@@ -567,7 +579,7 @@
             <tr><td colspan={cols.length} class="empty">无匹配进程</td></tr>
           {:else if viewMode === "tree"}
             {#each flatTree as p (p.pid)}
-              <tr class="tree-row" class:active-row={detailPid === p.pid} on:click={() => showDetail(p.pid)}>
+              <tr class="tree-row" class:active-row={detailPid === p.pid} on:click={() => showDetail(p.pid)} on:contextmenu={(e) => openProcessMenu(e, p)}>
                 <td class="col-name" title={p.name}>
                   <span style="padding-left:{indentOf(p._depth)}px">
                     {#if p._hasChildren}
@@ -598,7 +610,7 @@
             {/each}
           {:else}
             {#each merged as p (p.pid)}
-              <tr class:active-row={detailPid === p.pid} on:click={() => showDetail(p.pid)}>
+              <tr class:active-row={detailPid === p.pid} on:click={() => showDetail(p.pid)} on:contextmenu={(e) => openProcessMenu(e, p)}>
                 <td class="col-name" title={p.name}>{p.name}</td>
                 <td class="col-pid num mono">{p.pid}</td>
                 <td class="col-cpu num mono"><span class="cpu {sev(p.cpu)}">{p.cpu.toFixed(1)}%</span></td>

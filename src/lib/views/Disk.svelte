@@ -11,7 +11,8 @@
   import { open as shellOpen } from "@tauri-apps/api/shell";
   import { open as openDialog } from "@tauri-apps/api/dialog";
   import { listen } from "@tauri-apps/api/event";
-  import { pushToast, elevated, relaunchAdmin } from "../stores.js";
+  import { pushToast, elevated, relaunchAdmin, copyText } from "../stores.js";
+  import { openContextMenu } from "../contextMenu.js";
 
   let tab = "overview";
   let expandedDisk = -1; // 展开详情的物理盘 index
@@ -420,6 +421,51 @@
     openInExplorer(parentOfAbs(absPathFor(raw)));
   }
 
+  function openVolumeMenu(event, volume) {
+    const root = /^[a-zA-Z]:$/.test(volume.drive) ? `${volume.drive}\\` : volume.drive;
+    openContextMenu(event, [
+      { label: "进入空间分析", action: () => openAnalyzerForDrive(volume.drive) },
+      { label: "在资源管理器中打开", action: () => openInExplorer(root) },
+      { separator: true },
+      { label: "复制盘符", action: () => copyText(volume.drive, "盘符") },
+    ]);
+  }
+
+  function openDiskMenu(event, disk) {
+    openContextMenu(event, [
+      {
+        label: expandedDisk === disk.index ? "收起详情" : "查看详情",
+        action: () => (expandedDisk = expandedDisk === disk.index ? -1 : disk.index),
+      },
+      { separator: true },
+      { label: "复制型号", action: () => copyText(disk.model || "—", "型号") },
+      disk.serial ? { label: "复制序列号", action: () => copyText(disk.serial, "序列号") } : null,
+      disk.volumes?.length
+        ? { label: "复制承载分区", action: () => copyText(disk.volumes.join(" "), "承载分区") }
+        : null,
+    ]);
+  }
+
+  function openTreeMenu(event, row) {
+    if (row.kind === "loading") return;
+    const target = row.kind === "dir" ? absDir(row.rel) : row.absPath;
+    openContextMenu(event, [
+      {
+        label: row.kind === "dir" ? "打开目录" : "打开所在目录",
+        action: () =>
+          row.kind === "dir" ? openTreeFolder(row) : openInExplorer(parentOfAbs(row.absPath)),
+      },
+      { label: "复制完整路径", action: () => copyText(target, "完整路径") },
+    ]);
+  }
+
+  function openFileMenu(event, file) {
+    openContextMenu(event, [
+      { label: "在资源管理器中定位", action: () => openLargeFile(file.path) },
+      { label: "复制文件路径", action: () => copyText(absPathFor(file.path), "文件路径") },
+    ]);
+  }
+
   const fmtSize = (n) => {
     if (!n) return "0 B";
     if (n < 1024) return n + " B";
@@ -501,6 +547,7 @@
           tabindex="0"
           title="点击进入该分区的空间分析"
           on:click={() => openAnalyzerForDrive(v.drive)}
+          on:contextmenu={(e) => openVolumeMenu(e, v)}
           on:keydown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), openAnalyzerForDrive(v.drive))}
         >
           <div class="card-head">
@@ -540,6 +587,7 @@
             tabindex="0"
             title="点击查看详情"
             on:click={() => (expandedDisk = expandedDisk === d.index ? -1 : d.index)}
+            on:contextmenu={(e) => openDiskMenu(e, d)}
             on:keydown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
@@ -753,7 +801,8 @@
                 <span class="tr-name"><span class="tr-icon">…</span>{row.name}</span>
               </div>
             {:else}
-              <div class="tree-row" class:file={row.kind === "file"} style="--depth:{row.depth}">
+              <!-- svelte-ignore a11y-no-static-element-interactions -->
+              <div class="tree-row" class:file={row.kind === "file"} style="--depth:{row.depth}" on:contextmenu={(e) => openTreeMenu(e, row)}>
                 <span class="tr-name">
                   {#if row.kind === "dir"}
                     <button class="twisty" class:open={expanded.has(row.rel)} on:click={() => toggleExpand(row.rel)} aria-label={expanded.has(row.rel) ? "收起" : "展开"}>▸</button>
@@ -787,7 +836,7 @@
               </thead>
               <tbody>
                 {#each scanResult.large_files as f (f.path)}
-                  <tr>
+                  <tr on:contextmenu={(e) => openFileMenu(e, f)}>
                     <td class="file-path mono" title={f.path}>{f.path}</td>
                     <td class="num mono">{fmtSize(f.size)}</td>
                     <td class="num mono">{fmtTime(f.modified_secs)}</td>

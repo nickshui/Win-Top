@@ -1,5 +1,6 @@
 <script>
-  import { procEvents, etwAvailable, etwReason, elevated, relaunchAdmin } from "../stores.js";
+  import { procEvents, etwAvailable, etwReason, elevated, relaunchAdmin, copyText } from "../stores.js";
+  import { openContextMenu } from "../contextMenu.js";
 
   let filter = "all"; // all | start | stop
   let q = "";
@@ -19,6 +20,16 @@
   function togglePause() {
     if (!paused) frozen = live;
     paused = !paused;
+  }
+
+  function openEventMenu(event, item) {
+    openContextMenu(event, [
+      { label: `按「${item.image}」筛选`, action: () => (q = item.image) },
+      { separator: true },
+      { label: "复制进程名", action: () => copyText(item.image, "进程名") },
+      { label: `复制 PID（${item.pid}）`, action: () => copyText(item.pid, "PID") },
+      { label: "复制事件时间", action: () => copyText(item.ts, "事件时间") },
+    ]);
   }
 </script>
 
@@ -66,7 +77,8 @@
     </div>
   {:else}
     {#each shown as e (e._id)}
-      <div class="row">
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div class="row" on:contextmenu={(ev) => openEventMenu(ev, e)}>
         <span class="ts">{e.ts}</span>
         <span class="badge {e.action}">{e.action === "start" ? "启动" : "结束"}</span>
         <span class="image" title={e.image}>{e.image}</span>

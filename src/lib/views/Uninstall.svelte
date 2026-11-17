@@ -2,7 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
   import { open as shellOpen } from "@tauri-apps/api/shell";
-  import { pushToast, elevated, relaunchAdmin } from "../stores.js";
+  import { pushToast, elevated, relaunchAdmin, copyText } from "../stores.js";
+  import { openContextMenu } from "../contextMenu.js";
   import Modal from "../components/Modal.svelte";
   import UninstallWorkflow from "../components/uninstall/UninstallWorkflow.svelte";
   import {
@@ -176,6 +177,25 @@
     selectedPaths = new Set();
     workflow = createWorkflow(app, footprintCache.get(app.entry.id) || null);
     analyzeApp(app, seq);
+  }
+
+  function openAppMenu(event, app) {
+    const entry = app.entry;
+    openContextMenu(event, [
+      { label: "查看详情", disabled: flowLocked, action: () => selectApp(app) },
+      { separator: true },
+      { label: "复制应用名称", action: () => copyText(entry.name, "应用名称") },
+      entry.install_location
+        ? { label: "复制安装位置", action: () => copyText(entry.install_location, "安装位置") }
+        : null,
+      entry.install_location
+        ? {
+            label: "打开安装目录",
+            action: () =>
+              shellOpen(entry.install_location).catch((e) => pushToast("无法打开安装目录：" + e, "error")),
+          }
+        : null,
+    ]);
   }
 
   async function analyzeApp(app, seq) {
@@ -495,6 +515,7 @@
               aria-disabled={flowLocked && workflow.app?.entry.id !== app.entry.id}
               data-app-id={app.entry.id}
               on:click={() => selectApp(app)}
+              on:contextmenu={(e) => openAppMenu(e, app)}
             >
               <span class="app-icon">
                 {#if icons.get(app.entry.id)}

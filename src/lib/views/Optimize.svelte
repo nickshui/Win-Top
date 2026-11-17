@@ -1,7 +1,8 @@
 <script>
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport, autoBoostLast } from "../stores.js";
+  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport, autoBoostLast, copyText } from "../stores.js";
+  import { openContextMenu } from "../contextMenu.js";
   import Modal from "../components/Modal.svelte";
 
   export let navigate = () => {};
@@ -180,6 +181,19 @@
       pushToast(r.message, r.success ? "ok" : "error");
     } catch (e) { pushToast("操作失败：" + e, "error"); }
     finally { startupPending = null; }
+  }
+
+  function openStartupMenu(event, item) {
+    openContextMenu(event, [
+      {
+        label: item.enabled ? "禁用启动项" : "启用启动项",
+        action: () => confirmToggle(item),
+      },
+      { separator: true },
+      { label: "复制名称", action: () => copyText(item.name, "名称") },
+      { label: "复制命令", action: () => copyText(item.command, "命令") },
+      { label: "复制位置标识", action: () => copyText(item.location, "位置标识") },
+    ]);
   }
 
   const fmtBytes = (n) => {
@@ -401,7 +415,7 @@
           <tr><td colspan="4" class="empty">无启动项</td></tr>
         {:else}
           {#each startupItems as item (item.id)}
-            <tr>
+            <tr on:contextmenu={(e) => openStartupMenu(e, item)}>
               <td class="col-name" title={item.name}>{item.name}</td>
               <td>{locLabel(item.location)}</td>
               <td class="col-cmd mono" title={item.command}>{item.command}</td>

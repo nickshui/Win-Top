@@ -16,6 +16,7 @@
   import Tools from "./lib/views/Tools.svelte";
   import Assistant from "./lib/views/Assistant.svelte";
   import Toast from "./lib/components/Toast.svelte";
+  import ContextMenu from "./lib/components/ContextMenu.svelte";
 
   let current = "overview";
   let stopMetrics;
@@ -46,6 +47,17 @@
     if (stopGpuProc) stopGpuProc();
     if (stopBoostNotif) stopBoostNotif();
   });
+
+  // 桌面应用不保留 WebView2 的默认网页菜单；输入框、可选文本与 AI 对话区例外，
+  // 保证复制/粘贴/选中文本时仍是系统原生菜单。
+  function onNativeContextMenu(event) {
+    const target = event.target;
+    if (target?.closest?.('input, textarea, [contenteditable="true"], [data-native-context], .ai-view')) {
+      return;
+    }
+    if (window.getSelection()?.toString()) return;
+    event.preventDefault();
+  }
 
   const meta = {
     overview: { title: "概览", icon: "gauge" },
@@ -80,6 +92,8 @@
     about: { title: "关于", icon: "info" },
   };
 </script>
+
+<svelte:window on:contextmenu={onNativeContextMenu} />
 
 <div class="shell">
   <Sidebar {current} onSelect={(id) => (current = id)} />
@@ -117,6 +131,7 @@
   </div>
 </div>
 
+<ContextMenu />
 <Toast />
 
 <style>
