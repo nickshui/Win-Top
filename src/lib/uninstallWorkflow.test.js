@@ -129,3 +129,30 @@ test("只有真实文件系统目录提供打开操作", () => {
   assert.equal(canOpenArtifact({ kind: "service", path: "TestService" }), false);
   assert.equal(canOpenArtifact({ kind: "dir", path: "" }), false);
 });
+
+test("列表只在执行中禁止切换，等待卸载时切换需确认，复核结果可自由切走", async () => {
+  const { listGuard } = await import("./uninstallWorkflow.js");
+  assert.equal(listGuard({ phase: "overview" }), "free");
+  assert.equal(listGuard({ phase: "analyzing" }), "free");
+  assert.equal(listGuard({ phase: "cleaning" }), "busy");
+  assert.equal(listGuard({ phase: "launching" }), "busy");
+  assert.equal(listGuard({ phase: "review" }), "free");
+  assert.equal(listGuard({ phase: "complete" }), "free");
+  assert.equal(listGuard({ phase: "waiting" }), "pending");
+  assert.equal(listGuard({ phase: "error", recoverPhase: "waiting" }), "pending");
+  assert.equal(listGuard({ phase: "error", recoverPhase: "overview" }), "free");
+});
+
+test("已卸载应用按最近优先保留且不重复", async () => {
+  const { rememberRemovedApp, forgetRemovedApp } = await import("./uninstallWorkflow.js");
+  const a = { entry: { id: "a" } };
+  const b = { entry: { id: "b" } };
+  let removed = rememberRemovedApp([], a, { artifacts: [1] });
+  removed = rememberRemovedApp(removed, b, { artifacts: [] });
+  removed = rememberRemovedApp(removed, a, { artifacts: [2] }, { undo_token: "t" });
+  assert.deepEqual(removed.map((item) => item.app.entry.id), ["a", "b"]);
+  assert.deepEqual(removed[0].footprint.artifacts, [2]);
+  assert.equal(removed[0].result.undo_token, "t");
+  assert.deepEqual(forgetRemovedApp(removed, "a").map((item) => item.app.entry.id), ["b"]);
+  assert.equal(rememberRemovedApp(removed, null), removed);
+});

@@ -107,3 +107,41 @@ export function isCurrentRequest(currentAppId, currentSeq, responseAppId, respon
 export function canOpenArtifact(artifact) {
   return artifact?.kind === "dir" && typeof artifact.path === "string" && artifact.path.trim().length > 0;
 }
+
+/// 正在执行、不能被打断的阶段：此时切换应用会丢失进行中的操作结果。
+const BUSY_PHASES = ["preparing", "launching", "scanning", "cleaning"];
+/// 切走会中断后台检测的阶段（等待厂商卸载完成），切换前需要确认。
+const PENDING_PHASES = ["waiting"];
+
+/**
+ * 当前流程对左侧列表的约束：
+ * - busy：正在执行，列表禁止切换；
+ * - pending：正在等待厂商卸载，切换会停止自动检测，需要确认；
+ * - free：可以直接切换。复核 / 清理完成的结果会保留在「本次已卸载」中，随时可切回。
+ */
+export function listGuard(workflow = {}) {
+  const phase = workflow.phase;
+  if (BUSY_PHASES.includes(phase)) return "busy";
+  if (PENDING_PHASES.includes(phase)) return "pending";
+  if (phase === "error" && workflow.recoverPhase === "waiting") return "pending";
+  return "free";
+}
+
+/**
+ * 本次会话中卸载过的应用（已从注册表消失），保留在列表顶部，
+ * 方便切回去继续复核残留或撤销清理。
+ */
+export function rememberRemovedApp(removed = [], app, footprint, result = null) {
+  if (!app?.entry?.id) return removed;
+  const record = {
+    app,
+    footprint: footprint || null,
+    result: result || null,
+    removedAt: Date.now(),
+  };
+  return [record, ...removed.filter((item) => item.app.entry.id !== app.entry.id)];
+}
+
+export function forgetRemovedApp(removed = [], appId) {
+  return removed.filter((item) => item.app.entry.id !== appId);
+}

@@ -12,6 +12,9 @@
     transition,
     defaultSelectedPaths,
     isCurrentRequest,
+    listGuard,
+    rememberRemovedApp,
+    forgetRemovedApp,
   } from "../uninstallWorkflow.js";
 
   let apps = [];
@@ -38,11 +41,17 @@
   let staleResult = null;
   let staleUndoing = false;
   let footprintCache = new Map();
+  // 本次会话卸载过的应用：注册表里已经没有它们，但仍允许切回去复核残留 / 撤销清理。
+  let removedApps = [];
+  // 有待处理结果时切换应用的确认：{ app } | null
+  let switchTarget = null;
 
   $: filtered = filterSort(apps, search, sortKey, sortDir, filters);
-  $: flowLocked =
-    ["preparing", "launching", "waiting", "scanning", "review", "cleaning", "complete"].includes(workflow.phase) ||
-    (workflow.phase === "error" && workflow.recoverPhase === "waiting");
+  // busy：正在执行，禁止切换；pending：有待处理结果，切换前确认；free：可直接切换
+  $: guard = listGuard(workflow);
+  $: flowLocked = guard === "busy";
+  $: removedIds = new Set(removedApps.map((item) => item.app.entry.id));
+  $: visibleRemoved = removedApps.filter((item) => matchesQuery(item.app, search));
   $: artifacts = workflow.footprint?.artifacts || [];
   $: selectedArtifacts = artifacts.filter((item) => selectedPaths.has(item.path));
   $: selectedSize = selectedArtifacts.reduce((sum, item) => sum + (item.size || 0), 0);
@@ -54,6 +63,9 @@
     try {
       const next = await invoke("list_apps_scored");
       apps = next;
+      // 重新出现在注册表里的应用（例如已重新安装）不再属于「本次已卸载」
+      const installedIds = new Set(next.map((item) => item.entry.id));
+      removedApps = removedApps.filter((item) => !installedIds.has(item.app.entry.id));
       if (workflow.app && !flowLocked) {
         const refreshed = next.find((item) => item.entry.id === workflow.app.entry.id);
         if (refreshed) workflow = { ...workflow, app: refreshed };
@@ -86,15 +98,16 @@
   onMount(load);
   onDestroy(stopPolling);
 
-  function filterSort(list, query, key, direction, activeFilters) {
+  function matchesQuery(item, query) {
     const needle = query.trim().toLowerCase();
-    let out = needle
-      ? list.filter((item) =>
-          `${item.entry.name} ${item.entry.publisher} ${item.entry.version} ${item.entry.install_location}`
-            .toLowerCase()
-            .includes(needle)
-        )
-      : list;
+    if (!needle) return true;
+    return `${item.entry.name} ${item.entry.publisher} ${item.entry.version} ${item.entry.install_location}`
+      .toLowerCase()
+      .includes(needle);
+  }
+
+  function filterSort(list, query, key, direction, activeFilters) {
+    let out = query.trim() ? list.filter((item) => matchesQuery(item, query)) : list;
     if (activeFilters.size > 0) {
       out = out.filter((item) => {
         if (activeFilters.has("autostart") && !item.score.autostart) return false;
@@ -142,7 +155,7 @@
     else if (event.key === "End") nextIndex = filtered.length - 1;
     else nextIndex = current < 0 ? 0 : Math.min(filtered.length - 1, Math.max(0, current + (event.key === "ArrowDown" ? 1 : -1)));
     const target = filtered[nextIndex];
-    selectApp(target);
+    requestSelect(target);
     requestAnimationFrame(() => {
       const rows = document.querySelectorAll("[data-app-id]");
       for (const row of rows) {
@@ -163,8 +176,88 @@
     }
   }
 
+  function requestSelect(app) {
+    if (flowLocked || workflow.app?.entry.id === app.entry.id) return;
+    if (guard === "pending") {
+      switchTarget = app;
+      return;
+    }
+    selectApp(app);
+  }
+
+  function confirmSwitch() {
+    const app = switchTarget;
+    switchTarget = null;
+    if (app) selectApp(app);
+  }
+
+  /// 切离当前应用前，把「已卸载、仍有残留或可撤销结果」的状态存起来，切回来时恢复。
+  function stashCurrent() {
+    if (!workflow.app) return;
+    if (["review", "complete"].includes(workflow.phase)) {
+      removedApps = rememberRemovedApp(removedApps, workflow.app, workflow.footprint, workflow.result);
+    }
+  }
+
+  function selectRemoved(record) {
+    if (flowLocked || workflow.app?.entry.id === record.app.entry.id) return;
+    if (guard === "pending") {
+      switchTarget = record.app;
+      return;
+    }
+    openRemoved(record);
+  }
+
+  function openRemoved(record) {
+    stashCurrent();
+    ++requestSeq;
+    stopPolling();
+    capability = null;
+    uninstallConfirm = false;
+    cleanupConfirm = false;
+    userDataAcknowledged = false;
+    statusNote = "";
+    selectedPaths = new Set();
+    const phase = record.result ? "complete" : "review";
+    workflow = {
+      ...createWorkflow(record.app, record.footprint),
+      phase,
+      result: record.result,
+    };
+    // 回到复核页时重新核对一次：可能已被手动删除或撤销恢复
+    if (phase === "review") rescanRemoved(record.app);
+  }
+
+  async function rescanRemoved(app) {
+    const appId = app.entry.id;
+    const seq = requestSeq;
+    try {
+      const footprint = await invoke("resolve_footprint", { appId });
+      if (!isCurrentRequest(workflow.app?.entry.id, requestSeq, appId, seq) || workflow.phase !== "review") return;
+      workflow = { ...workflow, footprint };
+      removedApps = rememberRemovedApp(removedApps, app, footprint, null);
+    } catch {
+      // 缓存基线已失效（例如应用重新安装后又被移除）：保留原结果，不打断用户
+    }
+  }
+
+  function dismissRemoved(appId) {
+    removedApps = forgetRemovedApp(removedApps, appId);
+    if (workflow.app?.entry.id === appId && ["review", "complete"].includes(workflow.phase)) {
+      requestSeq += 1;
+      workflow = createWorkflow();
+      selectedPaths = new Set();
+    }
+  }
+
   function selectApp(app) {
     if (flowLocked) return;
+    const removedRecord = removedApps.find((item) => item.app.entry.id === app.entry.id);
+    if (removedRecord && !apps.some((item) => item.entry.id === app.entry.id)) {
+      openRemoved(removedRecord);
+      return;
+    }
+    stashCurrent();
     const seq = ++requestSeq;
     stopPolling();
     capability = null;
@@ -182,7 +275,7 @@
   function openAppMenu(event, app) {
     const entry = app.entry;
     openContextMenu(event, [
-      { label: "查看详情", disabled: flowLocked, action: () => selectApp(app) },
+      { label: "查看详情", disabled: flowLocked, action: () => requestSelect(app) },
       { separator: true },
       { label: "复制应用名称", action: () => copyText(entry.name, "应用名称") },
       entry.install_location
@@ -304,6 +397,7 @@
       const footprint = await invoke("resolve_footprint", { appId });
       if (!isCurrentRequest(workflow.app.entry.id, requestSeq, appId, seq)) return;
       workflow = transition(workflow, "SCAN_DONE", { footprint });
+      removedApps = rememberRemovedApp(removedApps, workflow.app, footprint, null);
       selectedPaths = defaultSelectedPaths(footprint.artifacts, footprint.app_removed);
     } catch (error) {
       if (workflow.phase === "waiting" || workflow.phase === "scanning") {
@@ -366,6 +460,7 @@
       }
       selectedPaths = new Set();
       workflow = transition(workflow, "CLEAN_DONE", { result, footprint });
+      removedApps = rememberRemovedApp(removedApps, workflow.app, footprint, result);
     } catch (error) {
       workflow = transition(workflow, "FAIL", { error: String(error), recoverPhase: "waiting" });
     }
@@ -378,6 +473,7 @@
       const message = await invoke("undo_removal", { undoToken: workflow.result.undo_token });
       const footprint = await invoke("resolve_footprint", { appId: workflow.app.entry.id });
       workflow = { ...workflow, phase: "review", footprint, result: null, error: "" };
+      removedApps = rememberRemovedApp(removedApps, workflow.app, footprint, null);
       selectedPaths = new Set();
       pushToast(message, "ok");
     } catch (error) {
@@ -441,6 +537,7 @@
   }
 
   async function finishWorkflow() {
+    stashCurrent();
     requestSeq += 1;
     stopPolling();
     workflow = createWorkflow();
@@ -463,6 +560,8 @@
     const s = String(raw || "").trim();
     return /^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : "";
   };
+  const residueCount = (footprint) =>
+    (footprint?.artifacts || []).filter((item) => item.kind === "dir" || item.kind === "reg-key").length;
   const iconInitial = (name) => (name || "?").trim().charAt(0).toUpperCase();
   const iconHue = (name) => {
     let h = 0;
@@ -504,17 +603,64 @@
           <div class="empty">加载中…</div>
         {:else if listError}
           <div class="empty list-error"><span>{listError}</span><button class="ghost sm" on:click={load}>重试</button></div>
-        {:else if filtered.length === 0}
+        {:else if filtered.length === 0 && visibleRemoved.length === 0}
           <div class="empty">无匹配应用</div>
         {:else}
-          {#each filtered as app (app.entry.id)}
+          {#if visibleRemoved.length}
+            <div class="group-label">本次已卸载 <span>{visibleRemoved.length}</span></div>
+            {#each visibleRemoved as record (record.app.entry.id)}
+              <div
+                class="row removed"
+                class:sel={workflow.app?.entry.id === record.app.entry.id}
+                class:locked={flowLocked && workflow.app?.entry.id !== record.app.entry.id}
+                role="option"
+                tabindex="-1"
+                aria-selected={workflow.app?.entry.id === record.app.entry.id}
+                aria-disabled={flowLocked && workflow.app?.entry.id !== record.app.entry.id}
+                data-app-id={record.app.entry.id}
+                on:click={() => selectRemoved(record)}
+                on:keydown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), selectRemoved(record))}
+              >
+                <span class="app-icon">
+                  {#if icons.get(record.app.entry.id)}
+                    <img src={icons.get(record.app.entry.id)} alt="" />
+                  {:else}
+                    <span class="icon-fallback" style="--h:{iconHue(record.app.entry.name)}">{iconInitial(record.app.entry.name)}</span>
+                  {/if}
+                </span>
+                <span class="row-body">
+                  <span class="row-top">
+                    <span class="row-name" title={record.app.entry.name}>{record.app.entry.name}</span>
+                    <span class="chip done">已卸载</span>
+                  </span>
+                  <span class="row-sub">
+                    {#if record.result}
+                      <span>已清理 {record.result.removed || 0} 项{record.result.undo_token ? " · 可撤销" : ""}</span>
+                    {:else}
+                      <span>残留 {residueCount(record.footprint)} 项待复核</span>
+                    {/if}
+                  </span>
+                </span>
+                <button
+                  class="row-dismiss"
+                  title="从列表移除（不影响已清理的结果）"
+                  aria-label="从本次已卸载列表移除"
+                  disabled={flowLocked}
+                  on:click|stopPropagation={() => dismissRemoved(record.app.entry.id)}
+                >×</button>
+              </div>
+            {/each}
+            {#if filtered.length}<div class="group-label">已安装 <span>{filtered.length}</span></div>{/if}
+          {/if}
+          {#each filtered.filter((item) => !removedIds.has(item.entry.id)) as app (app.entry.id)}
             <button
               class="row"
               class:sel={workflow.app?.entry.id === app.entry.id}
+              class:waiting={guard === "pending" && workflow.app?.entry.id === app.entry.id}
               class:locked={flowLocked && workflow.app?.entry.id !== app.entry.id}
               aria-disabled={flowLocked && workflow.app?.entry.id !== app.entry.id}
               data-app-id={app.entry.id}
-              on:click={() => selectApp(app)}
+              on:click={() => requestSelect(app)}
               on:contextmenu={(e) => openAppMenu(e, app)}
             >
               <span class="app-icon">
@@ -528,6 +674,7 @@
               <span class="row-body">
                 <span class="row-top">
                   <span class="row-name" title={app.entry.name}>{app.entry.name}</span>
+                  {#if guard === "pending" && workflow.app?.entry.id === app.entry.id}<span class="chip pending">卸载中</span>{/if}
                   {#if app.score.caution}<span class="chip caution">谨慎</span>{/if}
                   {#if app.score.autostart}<span class="chip">自启</span>{/if}
                 </span>
@@ -602,6 +749,17 @@
   </div>
 </Modal>
 
+<Modal open={!!switchTarget} title="切换到其他应用？" on:close={() => (switchTarget = null)}>
+  <div class="confirm-copy">
+    <p>正在等待「{workflow.app?.entry.name}」的厂商卸载完成。切换后将停止自动检测卸载结果。</p>
+    <p class="muted">如果卸载仍在进行，完成后可重新选择该应用；卸载成功的应用会出现在列表顶部的「本次已卸载」中。</p>
+  </div>
+  <div class="modal-actions">
+    <button class="ghost" on:click={() => (switchTarget = null)}>继续等待</button>
+    <button class="primary" on:click={confirmSwitch}>切换到 {switchTarget?.entry.name}</button>
+  </div>
+</Modal>
+
 <Modal open={staleConfirm} title="清理无效卸载登记" on:close={() => (staleConfirm = false)}>
   <div class="confirm-copy">
     <p>「{workflow.app?.entry.name}」的卸载程序或安装目录已不存在，Win-Top 无法启动厂商卸载器。</p>
@@ -666,6 +824,17 @@
   .score-pill.danger { color: var(--danger); background: rgba(239,68,68,.14); }
   .chip { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text-muted); font-size: 10px; }
   .chip.caution { border-color: rgba(245,158,11,.4); color: var(--warn); }
+  .chip.done { border-color: rgba(34,197,94,.4); color: #86efac; background: rgba(34,197,94,.08); }
+  .chip.pending { border-color: rgba(99,102,241,.45); color: #c7d2fe; background: rgba(99,102,241,.12); }
+  .group-label { display: flex; align-items: center; gap: 6px; padding: 7px 12px 5px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 11px; background: rgba(15,23,42,.35); }
+  .group-label span { font-family: var(--font-mono); }
+  .row.removed { position: relative; cursor: pointer; }
+  .row.removed .row-name { color: var(--text-muted); }
+  .row.waiting { box-shadow: inset 3px 0 0 #818cf8; }
+  .row-dismiss { flex: 0 0 auto; width: 24px; height: 24px; border: none; border-radius: 6px; background: transparent; color: var(--text-muted); font-size: 15px; line-height: 1; cursor: pointer; opacity: 0; }
+  .row.removed:hover .row-dismiss, .row-dismiss:focus-visible { opacity: 1; }
+  .row-dismiss:hover { background: var(--surface); color: var(--text); }
+  .row-dismiss:disabled { cursor: default; opacity: 0; }
   .ua-detail { min-width: 0; flex: 1; overflow-y: auto; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
   .empty { display: grid; place-content: center; gap: 10px; padding: 30px; color: var(--text-muted); text-align: center; font-size: 13px; }
   .list-error { color: #fca5a5; }
