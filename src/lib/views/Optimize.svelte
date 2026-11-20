@@ -282,7 +282,7 @@
           on:change={onThresholdChange}
           disabled={!autoCfg || autoSaving}
         >
-          {#each [70, 75, 80, 85, 90, 95] as t}
+          {#each [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as t}
             <option value={t}>{t}%</option>
           {/each}
         </select>
