@@ -34,6 +34,12 @@ pub fn start(app: AppHandle) {
 
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
+            // 每进程 I/O 只用于界面展示：窗口隐藏到托盘时不采集（每次全量扫描约 860 次 OpenProcess）。
+            // 恢复显示后清空基准，避免把隐藏期间的累计量算成一次性的超高速率。
+            if !crate::ui_visible() {
+                prev.clear();
+                continue;
+            }
             let now = Instant::now();
             let elapsed = now.duration_since(prev_time).as_secs_f64();
             if elapsed < 0.5 {

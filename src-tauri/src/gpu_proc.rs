@@ -33,6 +33,8 @@ use windows::Win32::System::Performance::{
 
 /// 采样周期：2 秒，与 `disk_io.rs` 及进程表刷新节奏一致。
 const CADENCE: Duration = Duration::from_secs(2);
+/// 窗口隐藏到托盘时的采样间隔：只为历史趋势提供总 GPU 占用。
+const HIDDEN_CADENCE: Duration = Duration::from_secs(5);
 /// 首个快照前的等待。必须 ≥1 秒（PDH 速率计数器在 <1 秒的连续采样下返回码正常但数值静默为 0，
 /// PoC 实测），这里取 1 秒而非 2 秒，只为让前端尽早拿到第一份快照，之后一律按 CADENCE。
 const FIRST_DELAY: Duration = Duration::from_secs(1);
@@ -1086,11 +1088,24 @@ fn run(app: AppHandle) {
 
         let mut first = true;
         loop {
-            std::thread::sleep(if first { FIRST_DELAY } else { CADENCE });
+            // 窗口隐藏到托盘时只需要给历史趋势提供总 GPU 占用：采样间隔放宽到 5 秒，
+            // 不再解析每进程名称、不推送界面事件。
+            let visible = crate::ui_visible();
+            std::thread::sleep(if first {
+                FIRST_DELAY
+            } else if visible {
+                CADENCE
+            } else {
+                HIDDEN_CADENCE
+            });
             first = false;
 
             // 进程名快照放在计时之外：走 2 秒 TTL 缓存，偶发一次全量枚举约 14 ms
-            let names = crate::process::pid_name_map_cached();
+            let names = if visible {
+                crate::process::pid_name_map_cached()
+            } else {
+                HashMap::new()
+            };
 
             let t0 = Instant::now();
             let rc = unsafe { PdhCollectQueryData(query.hquery) };
@@ -1124,6 +1139,9 @@ fn run(app: AppHandle) {
             let snapshot = aggregate(&sample, &names, t0.elapsed());
             // 发布槽先更新：即使 emit 失败（窗口关闭）历史侧也拿到的是本 tick 的数据
             publish_histogram(&snapshot);
+            if !visible {
+                continue;
+            }
             if !emit(&app, snapshot) {
                 // 窗口已关闭：关闭查询并退出线程
                 unsafe {

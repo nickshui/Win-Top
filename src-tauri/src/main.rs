@@ -639,6 +639,7 @@ async fn undo_removal(undo_token: String) -> Result<String, String> {
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_window("main") {
         let _ = window.show();
+        set_ui_visible(&window, true);
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
@@ -756,6 +757,41 @@ pub(crate) fn webview_ready() -> bool {
     WEBVIEW_READY.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// 主窗口是否可见。隐藏到托盘后，只服务界面的每进程采集（磁盘 I/O、网络流量）
+/// 暂停，系统级指标、历史记录、GPU 与自动加速照常运行。
+#[cfg(target_os = "windows")]
+static UI_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(target_os = "windows")]
+pub(crate) fn ui_visible() -> bool {
+    UI_VISIBLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 切换 WebView2 的可见状态：隐藏时让浏览器内核暂停页面的定时器、动画与渲染，
+/// 并尝试挂起渲染进程（TrySuspend，相当于 Edge 的「休眠标签页」），把内存交还系统；
+/// 显示时 WebView2 会自动恢复。
+#[cfg(target_os = "windows")]
+fn set_ui_visible(window: &tauri::Window, visible: bool) {
+    UI_VISIBLE.store(visible, std::sync::atomic::Ordering::Relaxed);
+    let _ = window.with_webview(move |webview| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
+        use windows039::core::Interface;
+        let controller = webview.controller();
+        let _ = controller.SetIsVisible(visible);
+        if visible {
+            return;
+        }
+        if let Ok(core) = controller.CoreWebView2() {
+            if let Ok(core3) = core.cast::<ICoreWebView2_3>() {
+                let handler = webview2_com::TrySuspendCompletedHandler::create(Box::new(
+                    |_error, _ok| Ok(()),
+                ));
+                let _ = core3.TrySuspend(&handler);
+            }
+        }
+    });
+}
+
 #[cfg(target_os = "windows")]
 fn main() {
     log_startup(&format!(
@@ -842,9 +878,19 @@ fn main() {
         })
         .on_window_event(|event| {
             // 关闭按钮 = 隐藏到托盘，不退出进程；真正退出走托盘菜单
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event.event() {
-                api.prevent_close();
-                let _ = event.window().hide();
+            match event.event() {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = event.window().hide();
+                    set_ui_visible(event.window(), false);
+                }
+                // 窗口可能不经过 show_main_window 就被重新显示（例如再次双击 exe 时，
+                // 单实例守卫从另一个进程直接 ShowWindow）。获得焦点即视为恢复，
+                // 保证页面一定会被唤醒。
+                tauri::WindowEvent::Focused(true) if !ui_visible() => {
+                    set_ui_visible(event.window(), true);
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![

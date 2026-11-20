@@ -216,9 +216,13 @@ pub fn run_metrics_loop(app: AppHandle) {
                 gpu,
             };
 
-            // 推入历史环形缓冲区
+            // 推入历史环形缓冲区（隐藏到托盘时照常记录，历史趋势不断档）
             crate::history::push(snapshot.clone());
 
+            // 窗口隐藏时不向界面推送：页面已挂起，推送只会浪费序列化与 IPC
+            if !crate::ui_visible() {
+                continue;
+            }
             if app.emit_all("metrics", snapshot).is_err() {
                 // 窗口已关闭，退出采集循环
                 break;

@@ -38,6 +38,10 @@ windows = { version = "0.58", features = [
   "Win32_Graphics_Imaging",
   "Win32_System_Com_StructuredStorage",
 ] }
+# 与 Tauri 1.x / wry 0.24 使用的 WebView2 绑定保持同一版本（已在依赖树中，不引入新代码）：
+# 用于窗口隐藏到托盘时挂起 WebView2（ICoreWebView2_3::TrySuspend）。
+webview2-com = "0.19.1"
+windows039 = { package = "windows", version = "0.39.0" }
 netstat2 = "0.9"
 wmi = "0.14"
 ferrisetw = "1"

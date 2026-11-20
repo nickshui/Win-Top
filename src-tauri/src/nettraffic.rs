@@ -164,6 +164,19 @@ fn run_sampler(app: AppHandle) {
         last = now;
 
         let cur = ACCUM.lock().map(|a| a.clone()).unwrap_or_default();
+        // 每进程网络速率只用于界面展示：窗口隐藏到托盘时只推进基准、不做进程枚举与推送。
+        // ETW 仍在累计字节数，恢复显示后的第一个速率即为正确值。
+        if !crate::ui_visible() {
+            if let Ok(mut acc) = ACCUM.lock() {
+                // 防止隐藏期间已退出进程的累计项无限增长（每 ~60 秒剪枝一次）
+                if acc.len() > 4096 {
+                    let names = crate::process::pid_name_map_cached();
+                    acc.retain(|pid, _| names.contains_key(pid));
+                }
+            }
+            prev = cur;
+            continue;
+        }
         let (total_down, total_up, raw_rows) = diff_rates(&prev, &cur, elapsed);
 
         let names = crate::process::pid_name_map();

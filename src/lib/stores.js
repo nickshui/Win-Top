@@ -23,8 +23,25 @@ export function startMetrics() {
     unlisten = u;
   });
 
+  // 窗口隐藏到托盘时后端暂停推送（采集与历史照常）。重新显示时用后端历史
+  // 补齐实时曲线，避免出现一段过时的数据。
+  const onVisible = async () => {
+    if (document.visibilityState !== "visible") return;
+    try {
+      const recent = await invoke("get_history", { n: MAX_HISTORY });
+      if (Array.isArray(recent) && recent.length) {
+        cpuHistory.set(recent.map((d) => d.cpu ?? 0));
+        metrics.set(recent[recent.length - 1]);
+      }
+    } catch {
+      // 补齐失败不影响后续实时推送
+    }
+  };
+  document.addEventListener("visibilitychange", onVisible);
+
   return () => {
     if (unlisten) unlisten();
+    document.removeEventListener("visibilitychange", onVisible);
   };
 }
 
