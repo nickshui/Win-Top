@@ -35,6 +35,9 @@
   .toast.error {
     border-left: 3px solid var(--danger);
   }
+  .toast.warn {
+    border-left: 3px solid var(--warn);
+  }
   @keyframes slide-in {
     from {
       transform: translateY(8px);

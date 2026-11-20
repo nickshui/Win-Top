@@ -135,7 +135,7 @@
   }
 
   // ===== 垃圾清理 =====
-  let scanLoading = false, cleanReport = null, selectedCats = new Set(), cleaning = false, cleanResult = null, cleanConfirm = false, createRpBeforeClean = true;
+  let scanLoading = false, cleanReport = null, selectedCats = new Set(), cleaning = false, cleanResult = null, cleanConfirm = false, createRpBeforeClean = false;
   async function scanJunk() {
     scanLoading = true; cleanReport = null; cleanResult = null;
     try {
@@ -148,7 +148,15 @@
   async function doClean() {
     cleanConfirm = false; cleaning = true;
     try {
-      if (createRpBeforeClean) { try { await invoke("create_restore_point", { description: "Win-Top 清理前自动还原点" }); } catch (e) { } }
+      // 还原点默认关闭：系统会为它做卷影快照（耗时数十秒、占用磁盘），且 Windows 默认
+      // 24 小时内只允许创建一个，之后的请求会被静默忽略。失败时明确告知，而不是假装成功。
+      if (createRpBeforeClean) {
+        try {
+          await invoke("create_restore_point", { description: "Win-Top 清理前自动还原点" });
+        } catch (e) {
+          pushToast("还原点创建失败，已继续清理：" + e, "warn");
+        }
+      }
       const cleanR = await invoke("clean_junk", { ids: [...selectedCats] });
       const boostR = await invoke("memory_boost");
       pushToast(`释放磁盘 ${fmtBytes(cleanR.freed_bytes)}，释放内存 ${boostR.freed_mb.toFixed(0)} MB`, "ok");
@@ -392,7 +400,7 @@
     <div class="clean-bar">
       <span class="clean-total">{fmtBytes(selectedBytes)}<span class="muted"> 可清理</span></span>
       <div class="clean-actions">
-        <label class="rp-toggle"><input type="checkbox" bind:checked={createRpBeforeClean} />创建还原点</label>
+        <label class="rp-toggle" title="清理前创建系统还原点：需要管理员权限，耗时数十秒并占用磁盘；Windows 默认 24 小时内只保留一次请求。清理的都是缓存与临时文件，一般无需勾选。"><input type="checkbox" bind:checked={createRpBeforeClean} disabled={!$elevated} />创建还原点（较慢）</label>
         <button class="ghost" on:click={scanJunk} disabled={scanLoading}>重新扫描</button>
         <button class="primary" on:click={() => (cleanConfirm = true)} disabled={cleaning || selectedCats.size === 0}>
           {cleaning ? "清理中…" : "一键优化"}
@@ -411,7 +419,7 @@
     {#if cleanResult}<div class="clean-result">已释放 <b>{fmtBytes(cleanResult.freed_bytes)}</b></div>{/if}
   {/if}
   <Modal open={cleanConfirm} title="确认优化" on:close={() => (cleanConfirm = false)}>
-    <p>清理 {selectedCats.size} 个分类共 {fmtBytes(selectedBytes)}，同时释放内存。不可撤销。{createRpBeforeClean ? "已勾选还原点。" : ""}</p>
+    <p>清理 {selectedCats.size} 个分类共 {fmtBytes(selectedBytes)}，同时释放内存。不可撤销。{createRpBeforeClean ? "将先创建系统还原点，可能需要数十秒。" : ""}</p>
     <div class="modal-actions"><button class="ghost" on:click={() => (cleanConfirm = false)}>取消</button><button class="primary" on:click={doClean}>确认</button></div>
   </Modal>
 
@@ -576,7 +584,10 @@
   tbody tr:hover { background: var(--surface-2); }
   .col-name { width: auto; }
   .col-cmd { max-width: 0; }
-  .col-sw { width: 64px; text-align: center; }
+  /* 状态列：开关宽 44px，原先 64px 列宽减去左右 14px 内边距只剩 36px，
+     溢出部分被 td 的 text-overflow: ellipsis 画成了「…」小点。 */
+  .col-sw { width: 88px; padding-left: 8px; padding-right: 18px; text-align: right; text-overflow: clip; }
+  td.col-sw { overflow: visible; }
   .empty { text-align: center; color: var(--text-muted); padding: 40px; }
 
   /* Toggle 开关（原始设计） */
