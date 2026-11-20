@@ -215,9 +215,12 @@ export function startCleanupNotifications() {
 // ===== 自动加速 / 托盘加速 =====
 // auto-boost：后端内存达阈值自动触发；boost-result：托盘菜单「立即加速」。
 export const autoBoostLast = writable(null);
+// 自动加速运行状态（armed / settling / paused 及暂停原因），后端状态变化时推送
+export const autoBoostState = writable(null);
 
 export function startBoostNotifications() {
-  let un1, un2;
+  let un1, un2, un3;
+  listen("auto-boost-state", (e) => autoBoostState.set(e.payload)).then((u) => (un3 = u));
   listen("auto-boost", (e) => {
     const p = e.payload;
     autoBoostLast.set(p);
@@ -230,6 +233,7 @@ export function startBoostNotifications() {
   return () => {
     if (un1) un1();
     if (un2) un2();
+    if (un3) un3();
   };
 }
 

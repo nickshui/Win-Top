@@ -1,7 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/tauri";
-  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport, autoBoostLast, copyText } from "../stores.js";
+  import { pushToast, elevated, relaunchAdmin, metrics, diskReport, loadDiskReport, autoBoostLast, autoBoostState, copyText } from "../stores.js";
   import { openContextMenu } from "../contextMenu.js";
   import Modal from "../components/Modal.svelte";
 
@@ -25,6 +25,8 @@
   let autoCfg = null;
   let autoSaving = false;
   $: lastAuto = $autoBoostLast ?? autoCfg?.last ?? null;
+  // 后端推送的最新状态优先；首次进入页面时用 get_auto_boost 的结果
+  $: autoState = $autoBoostState ?? autoCfg;
 
   async function loadAutoBoost() {
     try { autoCfg = await invoke("get_auto_boost"); } catch (e) { autoCfg = null; }
@@ -34,6 +36,8 @@
     autoSaving = true;
     try {
       autoCfg = await invoke("set_auto_boost", { enabled, threshold });
+      // 改阈值 / 开关会重置判断状态：立即同步，避免沿用旧阈值下的「暂停」提示
+      autoBoostState.set(autoCfg);
       pushToast(enabled ? `自动加速已开启：内存 ≥ ${autoCfg.threshold}% 时自动释放` : "自动加速已关闭", "ok");
     } catch (e) {
       pushToast("保存设置失败：" + e, "error");
@@ -256,7 +260,7 @@
     <div class="auto-head">
       <div>
         <h3 class="boost-title">自动加速</h3>
-        <p class="boost-sub">内存持续 45 秒高于阈值时自动释放（仅内存，不删文件）；触发后至少 10 分钟不重复，连续低收益时自动延长；全屏、电池、磁盘繁忙时暂停</p>
+        <p class="boost-sub">内存持续 45 秒高于阈值时自动释放（仅内存，不删文件）；加速后仍高于阈值时暂停重复加速；全屏、电池、磁盘繁忙时暂停</p>
       </div>
       <button
         class="toggle-switch"
@@ -291,6 +295,15 @@
         {/if}
       </span>
     </div>
+    {#if autoCfg?.enabled && autoState?.status === "settling"}
+      <p class="auto-status">刚完成一次加速，正在观察效果（约 30 秒）</p>
+    {:else if autoCfg?.enabled && autoState?.status === "paused"}
+      <p class="auto-status paused">
+        加速后内存仍在 <b class="mono">{autoState.paused_floor}%</b>，属于程序实际占用，已暂停重复加速。
+        内存降到 <b class="mono">{autoState.rearm_at}%</b> 以下后恢复正常；升到 <b class="mono">{autoState.resume_above}%</b> 以上会再次加速。
+        如需释放更多内存，可关闭不用的程序。
+      </p>
+    {/if}
   </div>
 
   <div class="entry-grid">
@@ -500,6 +513,9 @@
   .auto-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); margin-top: var(--sp-3); flex-wrap: wrap; }
   .auto-label { font-size: 13px; color: var(--text-muted); display: flex; align-items: center; gap: 8px; }
   .auto-select { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: inherit; font-size: 13px; padding: 4px 8px; }
+  .auto-status { margin: 10px 0 0; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(99, 102, 241, 0.1); color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+  .auto-status.paused { background: rgba(245, 158, 11, 0.1); color: #fcd34d; }
+  .auto-status b { color: var(--text); }
   .auto-last { font-size: 13px; color: var(--text-muted); }
   .auto-last b { color: var(--text); font-weight: 600; }
 
@@ -566,6 +582,7 @@
   /* Toggle 开关（原始设计） */
   .toggle-switch {
     position: relative;
+    flex-shrink: 0;
     width: 44px;
     height: 24px;
     border-radius: 999px;
