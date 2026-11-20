@@ -308,6 +308,29 @@
     return analysisTarget.kind === "volume" ? `${analysisTarget.target} 整卷` : analysisTarget.target;
   }
 
+  // 整卷扫描对账：文件实际字节 vs 分区已用（簇分配）。MFT 模式会读到包括
+  // System Volume Information 在内的所有文件，差额主要来自目录索引、簇尾空间、
+  // USN 日志等备用数据流；逐目录扫描还会缺少无权限读取的系统目录。
+  $: reconcile = (() => {
+    if (!scanResult || analysisTarget?.kind !== "volume" || scanResult.cancelled) return null;
+    const vol = volumes.find((v) => v.drive === analysisTarget.target);
+    if (!vol || !vol.total) return null;
+    const used = vol.total - vol.free;
+    const files = scanResult.root_size || 0;
+    if (!used || !files) return null;
+    const gap = used - files;
+    const pct = (Math.abs(gap) / used) * 100;
+    const note =
+      gap < 0
+        ? "文件合计大于已用：存在压缩、稀疏或重复数据删除的文件，实际占用小于文件大小。"
+        : pct <= 6
+        ? "差额来自目录索引、簇尾空间与文件系统日志等内部结构，属正常范围。"
+        : scanResult.source !== "mft"
+        ? "逐目录扫描无法读取部分系统目录，差额会偏大；以管理员运行可使用 MFT 扫描。"
+        : "差额偏大：可能包含大量小文件的簇尾空间或备用数据流（这部分不计入文件大小）。";
+    return { used, files, gap, pct, note };
+  })();
+
   // 构造可见行（展开状态 + 按需文件）
   $: visibleRows = analysisTarget ? buildRows(scanResult, expanded, filesCache, filesLoading, targetLabel()) : [];
 
@@ -784,6 +807,17 @@
           {/if}
         </div>
       </div>
+
+      {#if reconcile}
+        <div class="reconcile" title="分区已用空间按簇分配统计（含 NTFS 元数据、目录索引、系统保护等），文件大小按实际字节统计，两者存在差异属正常。">
+          <span>文件合计 <b class="mono">{fmtSize(reconcile.files)}</b></span>
+          <span class="sep">·</span>
+          <span>分区已用 <b class="mono">{fmtSize(reconcile.used)}</b></span>
+          <span class="sep">·</span>
+          <span>差额 <b class="mono">{fmtSize(Math.abs(reconcile.gap))}</b>（{reconcile.pct.toFixed(1)}%）</span>
+          <span class="reconcile-note">{reconcile.note}</span>
+        </div>
+      {/if}
 
       <div class="tree-wrap">
         <div class="tree-head">
@@ -1387,6 +1421,15 @@
     font-size: 13px;
     color: #fcd34d;
   }
+  .reconcile {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+    margin: -4px 0 12px; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: rgba(15, 23, 42, 0.28); color: var(--text-muted); font-size: 12px;
+  }
+  .reconcile b { color: var(--text); font-weight: 600; }
+  .reconcile .sep { opacity: 0.5; }
+  .reconcile-note { flex-basis: 100%; font-size: 11px; }
   .scan-summary-row {
     display: flex;
     align-items: center;

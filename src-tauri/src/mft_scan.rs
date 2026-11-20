@@ -86,6 +86,11 @@ struct MftEntry {
     size: u64,           // 文件大小（逻辑大小，等于 metadata().len()）
     is_dir: bool,        // 是否为目录
     modified_secs: u64,  // 最后修改时间（Unix 秒）
+    /// 非 0 表示这是一条**扩展记录**（属性太多、溢出到其它 MFT 记录，通过 $ATTRIBUTE_LIST 引用），
+    /// 值为所属基础记录号。扩展记录只用来把未命名 $DATA 的大小合并回基础记录：
+    /// 碎片极多的大文件（如几十 GB 的录屏）的 $DATA 往往不在基础记录里，
+    /// 丢弃扩展记录会把这类文件算成 0 字节。
+    base_frn: u64,
 }
 
 // ─── BinaryHeap 包装（最小堆，固定容量保留 top_n） ─────────────────────
@@ -315,19 +320,10 @@ fn read_one_record(
         return Ok(None);
     }
 
-    let file_record_length = {
-        if bytes_ret < 12 {
-            return Ok(None);
-        }
-        read_u32_le(&out_buf, 8) as usize
+    let raw_record = match record_payload(&out_buf, bytes_ret, frn, record_size) {
+        Some(raw) => raw,
+        None => return Ok(None),
     };
-
-    if file_record_length == 0 || file_record_length > record_size as usize {
-        return Ok(None);
-    }
-
-    // 取记录数据（偏移 12 开始）
-    let raw_record = &out_buf[12..12 + file_record_length];
     let mut record_buf = raw_record.to_vec();
 
     // 应用 USA 修复（如果尚未修复）
@@ -337,6 +333,30 @@ fn read_one_record(
 
     let entries = parse_record(&record_buf, frn)?;
     Ok(Some(entries))
+}
+
+/// 从 NTFS_FILE_RECORD_OUTPUT_BUFFER 中取出记录数据。
+///
+/// 布局：`FileReferenceNumber: i64`（偏移 0）、`FileRecordLength: u32`（偏移 8）、
+/// `FileRecordBuffer`（偏移 12）。
+///
+/// 关键：请求的记录号未使用时，FSCTL_GET_NTFS_FILE_RECORD 会返回**小于它的最近一条
+/// 在用记录**（见 MS 文档）。输出里的 FileReferenceNumber 才是真实记录号；不一致说明
+/// 读到的是重复的邻居记录，必须丢弃——否则同一文件会以不同 FRN 被计入几十次，
+/// 目录体积虚增，同名去重时又随机保留其中一条，导致每次扫描结果都不一样。
+fn record_payload(out: &[u8], bytes_ret: u32, requested_frn: u64, record_size: u32) -> Option<&[u8]> {
+    if bytes_ret < 12 || out.len() < 12 {
+        return None;
+    }
+    let returned_frn = read_u64_le(out, 0) & 0x0000_FFFF_FFFF_FFFF;
+    if returned_frn != requested_frn {
+        return None;
+    }
+    let len = read_u32_le(out, 8) as usize;
+    if len == 0 || len > record_size as usize || 12 + len > out.len() {
+        return None;
+    }
+    Some(&out[12..12 + len])
 }
 
 // ─── USA 修复 ──────────────────────────────────────────────────────────
@@ -400,11 +420,9 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
         return Ok(vec![]);
     }
 
-    // 跳过属性列表扩展记录（base record reference 非零）
+    // 扩展记录（base record reference 非零）：属性溢出到这里，没有 $FILE_NAME，
+    // 只需要把其中未命名 $DATA 的大小交给聚合层合并回基础记录。
     let base_ref = read_u48_le(record, 32);
-    if base_ref != 0 {
-        return Ok(vec![]);
-    }
 
     let attr_off = read_u16_le(record, 20) as usize;
     if attr_off >= record.len() {
@@ -475,9 +493,14 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
                 // $DATA（仅当未命名时取大小）
                 if name_len == 0 {
                     if non_resident {
-                        // 非驻留 $DATA：RealSize 在属性头偏移 48
-                        let real_size = read_u64_le(record, pos + 48);
-                        file_size = Some(real_size);
+                        // 非驻留 $DATA：RealSize 在属性头偏移 48。
+                        // 极度碎片化的文件会把 $DATA 拆成多段放在不同记录里，
+                        // 只有起始 VCN（偏移 16）为 0 的第一段才带有效的 RealSize。
+                        let lowest_vcn = read_u64_le(record, pos + 16);
+                        if lowest_vcn == 0 {
+                            let real_size = read_u64_le(record, pos + 48);
+                            file_size = Some(real_size);
+                        }
                     } else {
                         // 驻留 $DATA：ValueLength 在属性头偏移 16
                         let value_len = read_u32_le(record, pos + 16) as u64;
@@ -489,6 +512,23 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
         }
 
         pos += attr_len as usize;
+    }
+
+    if base_ref != 0 {
+        // 只有携带未命名 $DATA 的扩展记录才有意义；
+        // 非驻留属性的第一段（LowestVcn == 0）才带真实大小，见下方 $DATA 解析。
+        return Ok(match file_size {
+            Some(size) => vec![MftEntry {
+                frn,
+                parent_frn: 0,
+                name: String::new(),
+                size,
+                is_dir,
+                modified_secs: 0,
+                base_frn: base_ref,
+            }],
+            None => vec![],
+        });
     }
 
     // 如果没找到 $DATA 属性（空文件或目录），尺寸为 0
@@ -507,6 +547,7 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
             size,
             is_dir,
             modified_secs: *mtime,
+            base_frn: 0,
         },
         None => MftEntry {
             frn,
@@ -515,6 +556,7 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
             size,
             is_dir,
             modified_secs: 0,
+            base_frn: 0,
         },
     };
     Ok(vec![entry])
@@ -523,10 +565,24 @@ fn parse_record(record: &[u8], frn: u64) -> Result<Vec<MftEntry>, String> {
 // ─── 聚合 ─────────────────────────────────────────────────────────────
 
 fn aggregate(entries: Vec<MftEntry>, top_n: usize) -> disk_usage::UsageReport {
-    // 1. 建立 FRN → 条目索引（同 FRN 只取第一个）
+    // 1. 建立 FRN → 条目索引（同 FRN 只取第一个）；扩展记录单独收集大小
     let mut entry_map: HashMap<u64, MftEntry> = HashMap::new();
+    let mut ext_sizes: HashMap<u64, u64> = HashMap::new();
     for e in entries {
+        if e.base_frn != 0 {
+            let slot = ext_sizes.entry(e.base_frn).or_insert(0);
+            *slot = (*slot).max(e.size);
+            continue;
+        }
         entry_map.entry(e.frn).or_insert(e);
+    }
+    // 基础记录里没有 $DATA（大小为 0）时，用扩展记录里的真实大小补上
+    for (base, size) in ext_sizes {
+        if let Some(e) = entry_map.get_mut(&base) {
+            if !e.is_dir && e.size == 0 {
+                e.size = size;
+            }
+        }
     }
 
     let root_frn = 5u64; // NTFS 根目录固定为记录 5
@@ -923,7 +979,11 @@ mod tests {
         // Set base record reference to non-zero (extension record)
         record[32..40].copy_from_slice(&42u64.to_le_bytes());
         let entries = parse_record(&record, 400).unwrap();
-        assert_eq!(entries.len(), 0);
+        // 扩展记录不产生独立文件，只把 $DATA 大小交给基础记录 42 合并
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].base_frn, 42);
+        assert_eq!(entries[0].size, 100);
+        assert!(entries[0].name.is_empty());
     }
 
     #[test]
@@ -931,10 +991,10 @@ mod tests {
         // 构造树: root(5) -> dir1(10) -> file1(20)
         //                    -> file2(30)
         let entries = vec![
-            MftEntry { frn: 5, parent_frn: 0, name: "".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 10, parent_frn: 5, name: "subdir".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 20, parent_frn: 10, name: "file1.txt".to_string(), size: 1000, is_dir: false, modified_secs: 100 },
-            MftEntry { frn: 30, parent_frn: 5, name: "file2.txt".to_string(), size: 500, is_dir: false, modified_secs: 200 },
+            MftEntry { frn: 5, parent_frn: 0, name: "".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 10, parent_frn: 5, name: "subdir".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 20, parent_frn: 10, name: "file1.txt".to_string(), size: 1000, is_dir: false, modified_secs: 100, base_frn: 0 },
+            MftEntry { frn: 30, parent_frn: 5, name: "file2.txt".to_string(), size: 500, is_dir: false, modified_secs: 200, base_frn: 0 },
         ];
 
         let report = aggregate(entries, 5);
@@ -957,7 +1017,7 @@ mod tests {
     #[test]
     fn test_aggregate_top_n_heap() {
         let mut entries = vec![
-            MftEntry { frn: 5, parent_frn: 0, name: "".to_string(), size: 0, is_dir: true, modified_secs: 0 },
+            MftEntry { frn: 5, parent_frn: 0, name: "".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
         ];
         // 添加 10 个文件到根目录
         for i in 0..10 {
@@ -968,6 +1028,7 @@ mod tests {
                 size: (i as u64 + 1) * 100,
                 is_dir: false,
                 modified_secs: 0,
+                base_frn: 0,
             });
         }
 
@@ -984,7 +1045,7 @@ mod tests {
         // 只有一个文件，其父 FRN=5（根目录），但根目录不在 entry_map 中
         // BFS 仍会从 FRN 5 开始，找到该文件（因为它被注册在 children[5] 中）
         let entries = vec![
-            MftEntry { frn: 100, parent_frn: 5, name: "orphan.txt".to_string(), size: 100, is_dir: false, modified_secs: 0 },
+            MftEntry { frn: 100, parent_frn: 5, name: "orphan.txt".to_string(), size: 100, is_dir: false, modified_secs: 0, base_frn: 0 },
         ];
         let report = aggregate(entries, 10);
         // 该文件仍能被发现并分配路径
@@ -999,14 +1060,14 @@ mod tests {
         //                    -> c(25) -> file2(35)
         //         -> d(40) -> file3(45)
         let entries = vec![
-            MftEntry { frn: 5, parent_frn: 0, name: "".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 10, parent_frn: 5, name: "a".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 20, parent_frn: 10, name: "b".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 30, parent_frn: 20, name: "file.txt".to_string(), size: 500, is_dir: false, modified_secs: 0 },
-            MftEntry { frn: 25, parent_frn: 10, name: "c".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 35, parent_frn: 25, name: "file2.txt".to_string(), size: 300, is_dir: false, modified_secs: 0 },
-            MftEntry { frn: 40, parent_frn: 5, name: "d".to_string(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 45, parent_frn: 40, name: "file3.txt".to_string(), size: 200, is_dir: false, modified_secs: 0 },
+            MftEntry { frn: 5, parent_frn: 0, name: "".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 10, parent_frn: 5, name: "a".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 20, parent_frn: 10, name: "b".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 30, parent_frn: 20, name: "file.txt".to_string(), size: 500, is_dir: false, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 25, parent_frn: 10, name: "c".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 35, parent_frn: 25, name: "file2.txt".to_string(), size: 300, is_dir: false, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 40, parent_frn: 5, name: "d".to_string(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 45, parent_frn: 40, name: "file3.txt".to_string(), size: 200, is_dir: false, modified_secs: 0, base_frn: 0 },
         ];
 
         let report = aggregate(entries, 5);
@@ -1076,6 +1137,109 @@ mod diag_tests {
 }
 
 #[cfg(test)]
+mod extension_record_tests {
+    use super::*;
+
+    /// 复现：碎片极多的大文件，$DATA 属性被挪到扩展记录（基础记录里只有 $ATTRIBUTE_LIST），
+    /// 旧实现丢弃扩展记录，于是 33 GB 的文件被算成 0 字节，目录总大小偏小。
+    #[test]
+    fn data_size_from_extension_record_is_merged() {
+        let entries = vec![
+            MftEntry { frn: 5, parent_frn: 0, name: String::new(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 10, parent_frn: 5, name: "rec".into(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            // 基础记录：有文件名，但 $DATA 在扩展记录中 → 大小为 0
+            MftEntry { frn: 20, parent_frn: 10, name: "big.mp4".into(), size: 0, is_dir: false, modified_secs: 7, base_frn: 0 },
+            // 扩展记录：只携带 $DATA 的真实大小
+            MftEntry { frn: 21, parent_frn: 0, name: String::new(), size: 35_518_179_920, is_dir: false, modified_secs: 0, base_frn: 20 },
+            MftEntry { frn: 30, parent_frn: 10, name: "small.mp4".into(), size: 100, is_dir: false, modified_secs: 0, base_frn: 0 },
+        ];
+        let report = aggregate(entries, 10);
+        let rec = report.dirs.iter().find(|d| d.path == "rec").unwrap();
+        assert_eq!(rec.total_size, 35_518_179_920 + 100);
+        assert_eq!(rec.file_count, 2, "扩展记录不能被算成额外的文件");
+        assert_eq!(report.scanned, 2);
+        assert_eq!(report.root_size, 35_518_179_920 + 100);
+        assert_eq!(report.large_files[0].path, r"rec\big.mp4");
+        assert_eq!(report.large_files[0].size, 35_518_179_920);
+    }
+
+    /// 扩展记录里的后续 $DATA 段（LowestVcn ≠ 0）不带有效大小，不能覆盖真实值。
+    #[test]
+    fn non_first_data_segment_is_ignored() {
+        let mut rec = make_record_with_data(0, 5_000);
+        assert_eq!(parse_record(&rec, 99).unwrap()[0].size, 5_000);
+        set_lowest_vcn(&mut rec, 8);
+        assert_eq!(parse_record(&rec, 99).unwrap()[0].size, 0);
+    }
+
+    /// 构造一条带非驻留未命名 $DATA 的基础记录（偏移与 tests::make_mock_file_record 一致）。
+    fn make_record_with_data(lowest_vcn: u64, real_size: u64) -> Vec<u8> {
+        let mut buf = vec![0u8; 1024];
+        buf[0..4].copy_from_slice(b"FILE");
+        buf[20..22].copy_from_slice(&56u16.to_le_bytes());
+        buf[22..24].copy_from_slice(&0x01u16.to_le_bytes());
+        let pos = 56usize;
+        buf[pos..pos + 4].copy_from_slice(&0x80u32.to_le_bytes());
+        buf[pos + 4..pos + 8].copy_from_slice(&72u32.to_le_bytes());
+        buf[pos + 8] = 1; // non-resident
+        buf[pos + 16..pos + 24].copy_from_slice(&lowest_vcn.to_le_bytes());
+        buf[pos + 48..pos + 56].copy_from_slice(&real_size.to_le_bytes());
+        let end = pos + 72;
+        buf[end..end + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        buf
+    }
+
+    fn set_lowest_vcn(buf: &mut [u8], vcn: u64) {
+        buf[56 + 16..56 + 24].copy_from_slice(&vcn.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod record_payload_tests {
+    use super::*;
+
+    fn output(frn: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0u8; 12 + 1024];
+        out[0..8].copy_from_slice(&frn.to_le_bytes());
+        out[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        out[12..12 + payload.len()].copy_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn requested_record_is_returned() {
+        let out = output(1000, b"FILE-data");
+        assert_eq!(record_payload(&out, out.len() as u32, 1000, 1024), Some(&b"FILE-data"[..]));
+    }
+
+    /// 复现：请求未使用的 1001~1009 时，系统回退返回在用的 1000 号记录。
+    /// 旧实现把它当成 1001~1009 各自的文件，同一文件被计入 10 次。
+    #[test]
+    fn neighbour_record_for_unused_frn_is_rejected() {
+        let out = output(1000, b"FILE-data");
+        for requested in 1001..1010 {
+            assert_eq!(record_payload(&out, out.len() as u32, requested, 1024), None);
+        }
+    }
+
+    #[test]
+    fn sequence_number_in_high_bits_is_ignored() {
+        // 文件引用号高 16 位是序列号，比较时只看低 48 位记录号
+        let out = output((7u64 << 48) | 1000, b"FILE");
+        assert!(record_payload(&out, out.len() as u32, 1000, 1024).is_some());
+    }
+
+    #[test]
+    fn malformed_lengths_are_rejected() {
+        let out = output(5, b"FILE");
+        assert_eq!(record_payload(&out, 8, 5, 1024), None, "返回字节不足头部");
+        assert_eq!(record_payload(&out, out.len() as u32, 5, 2), None, "记录长度超过记录大小");
+        let empty = output(5, b"");
+        assert_eq!(record_payload(&empty, empty.len() as u32, 5, 1024), None);
+    }
+}
+
+#[cfg(test)]
 mod dedup_tests {
     use super::*;
 
@@ -1083,11 +1247,11 @@ mod dedup_tests {
     fn duplicate_paths_are_merged() {
         // 两个不同 FRN 但同父同名（孤儿记录等异常场景），应只保留一条且取较大体积
         let entries = vec![
-            MftEntry { frn: 5, parent_frn: 0, name: String::new(), size: 0, is_dir: true, modified_secs: 0 },
-            MftEntry { frn: 10, parent_frn: 5, name: "dup".into(), size: 0, is_dir: true, modified_secs: 1 },
-            MftEntry { frn: 11, parent_frn: 5, name: "dup".into(), size: 0, is_dir: true, modified_secs: 2 },
-            MftEntry { frn: 20, parent_frn: 10, name: "a.bin".into(), size: 1000, is_dir: false, modified_secs: 0 },
-            MftEntry { frn: 21, parent_frn: 11, name: "b.bin".into(), size: 500, is_dir: false, modified_secs: 0 },
+            MftEntry { frn: 5, parent_frn: 0, name: String::new(), size: 0, is_dir: true, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 10, parent_frn: 5, name: "dup".into(), size: 0, is_dir: true, modified_secs: 1, base_frn: 0 },
+            MftEntry { frn: 11, parent_frn: 5, name: "dup".into(), size: 0, is_dir: true, modified_secs: 2, base_frn: 0 },
+            MftEntry { frn: 20, parent_frn: 10, name: "a.bin".into(), size: 1000, is_dir: false, modified_secs: 0, base_frn: 0 },
+            MftEntry { frn: 21, parent_frn: 11, name: "b.bin".into(), size: 500, is_dir: false, modified_secs: 0, base_frn: 0 },
         ];
         let report = aggregate(entries, 10);
         let dups: Vec<_> = report.dirs.iter().filter(|d| d.path == "dup").collect();
